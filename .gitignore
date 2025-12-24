@@ -1,2 +1,18 @@
-node_modules/
+# Ignore all Python files
+*.py
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore env files
 .env
+.env.*
+
+# Ignore node modules
+node_modules/
+
+# Ignore logs
+*.log
+generateCollegeImages.js
+migrated.js

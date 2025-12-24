@@ -14,6 +14,7 @@ import multer from "multer";
 import fs from "fs";
 
 
+
 cloudinary.config({
   cloud_name: process.env.CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -70,12 +71,11 @@ const upload = multer({
 });
 
 mongoose
-  .connect(process.env.MONGO_URI, {
-    autoIndex: true,
-
+  .connect(process.env.MONGO_URI)
+  .then(() => {
+    console.log("MongoDB Connected");
   })
-  .then(() => console.log("MongoDB Connected"))
-  .catch((err) => console.log("Mongo Error:", err.message));
+  .catch(err => console.log(err))
 
 
 const generateId = () => Date.now() + Math.floor(Math.random() * 1000);
@@ -140,45 +140,31 @@ const ReviewSchema = new mongoose.Schema({
 const CollegeSchema = new mongoose.Schema(
   {
     id: { type: Number, index: true, unique: true },
-    name: { type: String, index: true },
+
+    name: String,
     location: String,
-    tagline: String,
+    established: Number,
+    type: String,
+    stream: String,
     rating: Number,
     reviewCount: Number,
-    imageUrl: String,
-    logoUrl: String,
-    gallery: {
-      type: [String], // Cloudinary HTTPS URLs
-      default: [],
-    },
-
-    established: Number,
-    type: { type: String, enum: ["Private", "Government"] },
-    stream: {
-      type: String,
-      enum: [
-        "Engineering",
-        "Medical",
-        "Management",
-        "Arts & Science",
-        "Law",
-        "Design"
-      ],
-      required: true
-    },
-    accreditation: [String],
     description: String,
     highlights: [String],
-    feesRange: {
-      min: Number,
-      max: Number,
-    },
+    gallery: [String],
     courses: [CourseSchema],
-    placements: PlacementsSchema,
-    reviews: [ReviewSchema]
+    heroImages: [String],
+    heroDownloaded: { type: Boolean, default: false },
+
+    // VERY IMPORTANT FIELD:
+    rawScraped: {
+      type: Object,
+      default: {},
+    },
+
   },
   { timestamps: true }
 );
+
 
 CollegeSchema.index({ name: "text", location: 1 });
 
@@ -188,18 +174,117 @@ const College = mongoose.model("college", CollegeSchema);
 const ExamSchema = new mongoose.Schema(
   {
     id: { type: Number, index: true, unique: true },
-    name: String,
+
+    /* BASIC INFO */
+    name: String,                 // "JEE Main 2026"
+    full_name: String,            // full title
     logoUrl: String,
     conductingBody: String,
-    stream: String,
-    date: String,
-    description: String,
-    eligibility: String,
-    syllabus: [{ subject: String, topics: [String] }],
-    importantDates: [{ event: String, date: String }],
+    stream: String,               // Engineering / Medical etc.
+
+    /* ABOUT */
+    about: {
+      description: String,
+      about_table: [
+        {
+          section: String,
+          detail: String,
+        },
+      ],
+    },
+
+    /* HIGHLIGHTS */
+    highlights: {
+      full_exam_name: String,
+      short_exam_name: String,
+      conducting_body: String,
+      frequency_of_conduct: String,
+      exam_level: String,
+      mode_of_application: String,
+      mode_of_exam: String,
+      mode_of_counselling: String,
+      participating_colleges: Number,
+      exam_duration: String,
+      languages: [String],
+    },
+
+    /* IMPORTANT DATES */
+    important_dates: [
+      {
+        session: String,
+        exam_date: String,
+        result_date: String,
+        mode: String,
+      },
+    ],
+
+    /* ELIGIBILITY */
+    eligibility: {
+      basic_criteria: [
+        {
+          particular: String,
+          detail: String,
+        },
+      ],
+      course_wise_eligibility: [
+        {
+          course: String,
+          criteria: String,
+        },
+      ],
+      reservation_criteria: [
+        {
+          category: String,
+          reservation: String,
+        },
+      ],
+    },
+
+    /* EXAM PATTERN */
+    exam_pattern: {
+      paper_1: {
+        name: String,
+        exam_mode: String,
+        duration: String,
+        subjects: [String],
+        total_questions: Number,
+        total_marks: Number,
+        marking_scheme: String,
+      },
+      paper_2: {
+        b_arch: {
+          subjects: [String],
+          total_questions: Number,
+          total_marks: Number,
+          duration: String,
+        },
+        b_plan: {
+          subjects: [String],
+          total_questions: Number,
+          total_marks: Number,
+          duration: String,
+        },
+      },
+    },
+
+    /* SYLLABUS */
+    syllabus: {
+      sections: [
+        {
+          title: String,
+          content: [
+            {
+              chapter: String,
+              raw_text: [String],
+            },
+          ],
+        },
+      ],
+    },
   },
   { timestamps: true }
 );
+
 const Exam = mongoose.model("exam", ExamSchema);
 
 
@@ -586,20 +671,63 @@ app.post(
 app.get(
   "/api/colleges",
   asyncHandler(async (req, res) => {
-    const page = Math.max(parseInt(req.query.page) || 1, 1);
-    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
-    const q = req.query.q ? { $text: { $search: req.query.q } } : {};
 
-    const data = await College.find(q)
+    // ✅ DEFAULT: return ALL colleges (up to 100)
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 100, 100);
+
+    // optional text search
+    const q = req.query.q
+      ? { $text: { $search: req.query.q } }
+      : {};
+
+    // fetch data
+    let data = await College.find(q)
+      .sort({ rating: -1, createdAt: -1 }) // optional: better ordering
       .skip((page - 1) * limit)
       .limit(limit)
       .lean();
 
+    // normalize data for frontend
+    data = data.map(c => {
+
+      const ranking2025 = Array.isArray(c.rawScraped?.ranking_data)
+        ? c.rawScraped.ranking_data.find(r =>
+            r.ranking?.includes("2025")
+          )?.ranking ?? null
+        : null;
+
+      return {
+        ...c,
+
+        // hero image
+        imageUrl: c.heroImages?.[0] ?? null,
+
+        // logo
+        logoUrl: c.rawScraped?.logo ?? null,
+
+        // normalize fields
+        type: c.type ?? null,
+        stream: c.rawScraped?.stream ?? null,
+        ranking: ranking2025,
+        feesRange: c.rawScraped?.feesRange ?? null,
+      };
+    });
+
     const total = await College.countDocuments(q);
 
-    res.json({ success: true, page, limit, total, data });
+    res.json({
+      success: true,
+      page,
+      limit,
+      total,
+      data,
+    });
   })
 );
+
+
+
 
 // Read single
 app.get(
@@ -996,6 +1124,10 @@ app.use((err, req, res, next) => {
   console.error("Unhandled Error:", err);
   sendError(res, err.message || "Server Error", 500);
 });
+
+
+
+
 
 // -------------------- START SERVER --------------------
 const PORT = process.env.PORT || 5000;
