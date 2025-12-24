@@ -22,9 +22,15 @@ cloudinary.config({
 });
 
 const allowedOrigins = [
+  // local
   "http://localhost:3000",
-  "http://localhost:3001"
+  "http://localhost:3001",
+
+  // production (VERCEL)
+  "https://supportstudycups.vercel.app",
+  "https://supportstudycups-5e5dg3cuk-alishakhan897s-projects.vercel.app"
 ];
+
 
 const app = express();
 app.use(express.json());
@@ -40,19 +46,23 @@ app.use(
 app.use(
   cors({
     origin: (origin, callback) => {
+      // allow Postman / server-side calls
       if (!origin) return callback(null, true);
 
       if (!allowedOrigins.includes(origin)) {
-        return callback(
-          new Error("CORS error: Origin not allowed " + origin),
-          false
-        );
+        console.log("Blocked by CORS:", origin);
+        return callback(null, false);
       }
 
-      callback(null, true);
-    }
+      return callback(null, true);
+    },
+    credentials: true,
   })
 );
+
+// 🔥 IMPORTANT: preflight requests allow karo
+app.options("*", cors());
+
 
 app.use(
   rateLimit({
