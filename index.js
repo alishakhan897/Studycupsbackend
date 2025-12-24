@@ -1,11 +1,11 @@
 
+import cors from "cors";
 import express from "express";
 import http from "http";
 import { Server as SocketIOServer } from "socket.io";
 import mongoose from "mongoose";
 import dotenv from "dotenv";
 dotenv.config();
-import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import PDFDocument from "pdfkit";
@@ -33,7 +33,28 @@ const allowedOrigins = [
 
 
 const app = express();
-app.use(express.json());
+app.use(express.json()); 
+
+// ================== CORS FIX (FINAL) ==================
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Origin, X-Requested-With, Content-Type, Accept, Authorization"
+  );
+  res.header(
+    "Access-Control-Allow-Methods",
+    "GET, POST, PUT, DELETE, OPTIONS"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+
+  next();
+});
+// ======================================================
+
 
 app.use(
   helmet({
@@ -41,27 +62,6 @@ app.use(
   })
 );
 
-
-
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // allow Postman / server-side calls
-      if (!origin) return callback(null, true);
-
-      if (!allowedOrigins.includes(origin)) {
-        console.log("Blocked by CORS:", origin);
-        return callback(null, false);
-      }
-
-      return callback(null, true);
-    },
-    credentials: true,
-  })
-);
-
-// 🔥 IMPORTANT: preflight requests allow karo
-app.options("*", cors());
 
 
 app.use(
