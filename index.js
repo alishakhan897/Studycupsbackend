@@ -1,5 +1,4 @@
 
-import cors from "cors";
 import express from "express";
 import http from "http";
 import { Server as SocketIOServer } from "socket.io";
@@ -12,6 +11,8 @@ import PDFDocument from "pdfkit";
 import { v2 as cloudinary } from "cloudinary";
 import multer from "multer";
 import fs from "fs";
+import Parser from "rss-parser";
+const parser = new Parser();
 
 
 
@@ -558,9 +559,6 @@ app.post(
 );
 
 
-
-
-
 app.get(
   "/api/enquiries",
   asyncHandler(async (req, res) => {
@@ -871,15 +869,75 @@ app.get(
 
 
 app.get(
-  "/api/course/:courseId",
+  "/api/course/:slug",
   asyncHandler(async (req, res) => {
-    const courseId = Number(req.params.courseId);
-    const college = await College.findOne({ "courses.id": courseId }, { "courses.$": 1, name: 1, id: 1 });
-    if (!college || !college.courses || college.courses.length === 0)
-      return sendError(res, "Course not found", 404);
-    res.json({ success: true, college: { id: college.id, name: college.name }, course: college.courses[0] });
+
+    // 1️⃣ URL decode
+    const slug = decodeURIComponent(req.params.slug).trim();
+    console.log("🔹 Requested slug:", slug);
+
+    // 2️⃣ Regex safe banana (dot, spaces, case issue fix)
+    const nameRegex = new RegExp(
+      "^" +
+        slug
+          .replace(/\./g, "\\.")     // dot fix
+          .replace(/\s+/g, "\\s*")   // space flexible
+      + "$",
+      "i" // case-insensitive
+    );
+
+    // 3️⃣ College collection me search
+    const college = await College.findOne(
+      {
+        $or: [
+          { "courses.name": nameRegex },
+          { "courses_full_time.name": nameRegex },
+          { "courses_part_time.name": nameRegex }
+        ]
+      },
+      {
+        name: 1,
+        id: 1,
+        courses: { $elemMatch: { name: nameRegex } },
+        courses_full_time: { $elemMatch: { name: nameRegex } },
+        courses_part_time: { $elemMatch: { name: nameRegex } }
+      }
+    );
+
+    // 4️⃣ Agar kuch bhi nahi mila
+    if (!college) {
+      return res.status(404).json({
+        success: false,
+        error: "Course not found"
+      });
+    }
+
+    // 5️⃣ Course nikaalo (jis array me mila ho)
+    const course =
+      college.courses?.[0] ||
+      college.courses_full_time?.[0] ||
+      college.courses_part_time?.[0];
+
+    if (!course) {
+      return res.status(404).json({
+        success: false,
+        error: "Course not found"
+      });
+    }
+
+    // 6️⃣ SUCCESS RESPONSE
+    res.json({
+      success: true,
+      courseKey: course.name,
+      courseIds: [course.id],
+      college: {
+        id: college.id,
+        name: college.name
+      }
+    });
   })
 );
+
 
 // --- Exams ---
 app.post(
@@ -1034,8 +1092,26 @@ app.get(
 app.get(
   "/api/blogs/:id",
   asyncHandler(async (req, res) => {
-    const blog = await Blog.findOne({ id: Number(req.params.id) });
-    if (!blog) return sendError(res, "Blog not found", 404);
+    const { id } = req.params;
+
+    // ✅ ObjectId validation
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid blog id",
+      });
+    }
+
+    // ✅ Correct lookup
+    const blog = await Blog.findById(id);
+
+    if (!blog) {
+      return res.status(404).json({
+        success: false,
+        message: "Blog not found",
+      });
+    }
+
     res.json({ success: true, data: blog });
   })
 );
