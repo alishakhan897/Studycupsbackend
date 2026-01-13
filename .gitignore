@@ -1,5 +1,4 @@
-# Ignore all Python files
-*.py
+
 
 # Ignore Python cache
 __pycache__/
@@ -13,6 +12,3 @@ __pycache__/
 node_modules/
 
 # Ignore logs
-*.log
-generateCollegeImages.js
-migrated.js
