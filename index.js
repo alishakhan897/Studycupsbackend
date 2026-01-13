@@ -13,8 +13,18 @@ import multer from "multer";
 import fs from "fs";
 import Parser from "rss-parser";
 const parser = new Parser();
+import { exec } from "child_process";
 
 
+const mainConn = mongoose.createConnection(
+  process.env.MONGO_URI, // studentcap
+  { dbName: "studentcap" }
+);
+
+const tempConn = mongoose.createConnection(
+  process.env.MONGO_URI,
+  { dbName: "studycups" }
+);
 
 cloudinary.config({
   cloud_name: process.env.CLOUD_NAME,
@@ -32,9 +42,67 @@ const allowedOrigins = [
   "https://supportstudycups-5e5dg3cuk-alishakhan897s-projects.vercel.app"
 ];
 
+function normalizeCollegeForMainDB(data) {
+  return {
+    ...data,
+
+    // ✅ keep full rawScraped
+    rawScraped: data.rawScraped || data,
+
+    // ✅ normalized fields only for frontend usage
+    gallery: normalizeGallery(data.gallery),
+    courses: Array.isArray(data.courses)
+      ? data.courses.map(normalizeCourse)
+      : [],
+  };
+}
+
+function isValidImageUrl(url) {
+  if (!url || typeof url !== "string") return false;
+
+  // dotenv / logs / garbage block
+  if (url.includes("dotenv@") || url.includes("injecting env")) return false;
+
+  // basic image check
+  return /\.(jpg|jpeg|png|webp)$/i.test(url);
+}
+
+function normalizeGallery(gallery) {
+  if (!Array.isArray(gallery)) return [];
+  return gallery.map(item => {
+    if (typeof item === 'string') return item;
+    if (typeof item === 'object' && item.image) return item.image;
+    return null;
+  }).filter(Boolean);
+}
+
+function normalizeCourse(course) {
+  return {
+    ...course,
+    fees: parseFees(course.fees)
+  };
+}
+
+function parseFees(value) {
+  if (!value) return null;
+  if (typeof value === 'number') return value;
+  const clean = value.toString().replace(/,|Rs.?|INR/gi, '').toLowerCase().trim();
+  if (clean.includes('-')) {
+    const min = clean.split('-')[0];
+    return parseFloat(min) || null;
+  }
+  if (clean.includes('lakh')) {
+    const num = parseFloat(clean);
+    return isNaN(num) ? null : num * 100000;
+  }
+  const num = parseFloat(clean);
+  return isNaN(num) ? null : num;
+}
+
 
 const app = express();
-app.use(express.json()); 
+app.use(express.json({ limit: "5mb" }));
+app.use(express.urlencoded({ extended: true, limit: "5mb" }));
 
 // ================== CORS FIX (FINAL) ==================
 app.use((req, res, next) => {
@@ -88,6 +156,47 @@ mongoose
   })
   .catch(err => console.log(err))
 
+console.log("🟢 NODE MONGO_URI:", process.env.MONGO_URI);
+
+const runPythonScraper = (url) => {
+  return new Promise((resolve, reject) => {
+    exec(
+      `py -3 detailed_scraping.py "${url}"`,
+      { maxBuffer: 1024 * 1024 * 100 }, // 100MB
+      (error, stdout, stderr) => {
+        if (error) {
+          return reject(error);
+        }
+
+        const insertedId = stdout.trim();
+
+        console.log("PYTHON STDOUT:", insertedId);
+
+        if (!insertedId || insertedId.length < 10) {
+          reject("Invalid temp id from python");
+        } else {
+          resolve(insertedId); // ✅ ONLY _id
+        }
+
+      }
+    );
+  });
+};
+
+const runCommand = (command) => {
+  return new Promise((resolve, reject) => {
+    exec(command, { maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
+      if (error) {
+        console.error(stderr);
+        return reject(error);
+      }
+      resolve(stdout);
+    });
+  });
+};
+
+
+
 
 const generateId = () => Date.now() + Math.floor(Math.random() * 1000);
 
@@ -103,33 +212,207 @@ const safeParseJSON = (text) => {
   return JSON.parse(match[0]);
 };
 
+function mapScrapedCollegeToCMS(college) {
+  // ensure content exists
+  if (!college.content) college.content = {};
+
+  /* ================= ADMISSION ================= */
+  if (!college.content.admission) {
+    college.content.admission = {
+      title: "Admission",
+      blocks: []
+    };
+  }
+
+  // ❗ sirf scraped blocks hatao, manual nahi
+  college.content.admission.blocks =
+    college.content.admission.blocks.filter(
+      b => b.source === "manual"
+    );
+
+  // description → text block
+  if (college.description) {
+    college.content.admission.blocks.push({
+      type: "text",
+      data: { text: college.description },
+      source: "scraped",
+    });
+  }
+
+  // highlights → list block
+  if (college.highlights?.length) {
+    college.content.admission.blocks.push({
+      type: "list",
+      data: { items: college.highlights },
+      source: "scraped",
+    });
+  }
+
+  /* ================= COURSES ================= */
+  if (Array.isArray(college.courses)) {
+    college.courses.forEach(course => {
+      if (!course.content) course.content = {};
+
+      if (!course.content.about) {
+        course.content.about = {
+          title: "About Course",
+          blocks: []
+        };
+      }
+
+      course.content.about.blocks =
+        course.content.about.blocks.filter(
+          b => b.source === "manual"
+        );
+
+      if (course.about) {
+        course.content.about.blocks.push({
+          type: "text",
+          data: { text: course.about },
+          source: "scraped",
+        });
+      }
+
+      // admissionProcess → table
+      if (course.admissionProcess?.length) {
+        course.content.admission = {
+          title: "Admission Process",
+          blocks: [
+            {
+              type: "table",
+              data: {
+                columns: ["Step", "Title", "Description"],
+                rows: course.admissionProcess.map(s => [
+                  s.step,
+                  s.title,
+                  s.description
+                ])
+              },
+              source: "scraped",
+            }
+          ]
+        };
+      }
+    });
+  }
+}
+
+
+
+
+const ContentBlockSchema = new mongoose.Schema(
+  {
+    type: {
+      type: String,
+      enum: ["text", "list", "table", "key_value", "custom"],
+      required: true,
+    },
+
+    data: {
+      type: mongoose.Schema.Types.Mixed,
+      required: true,
+    },
+
+    source: {
+      type: String,
+      enum: ["scraped", "manual"],
+      default: "manual",
+    },
+
+    order: {
+      type: Number,
+      default: 0,
+    },
+  },
+  { _id: false }
+);
+
+const CourseSectionSchema = new mongoose.Schema(
+  {
+    title: String,
+    blocks: {
+      type: [ContentBlockSchema],
+      default: [],
+    },
+  },
+  { _id: false }
+);
+const CourseCMSLayerSchema = new mongoose.Schema(
+  {
+    about: CourseSectionSchema,
+    eligibility: CourseSectionSchema,
+    admission: CourseSectionSchema,
+    fees: CourseSectionSchema,
+    curriculum: CourseSectionSchema,
+    career: CourseSectionSchema,
+    faq: CourseSectionSchema,
+  },
+  { _id: false }
+);
+
 
 
 const CourseSchema = new mongoose.Schema(
   {
+    // ===== EXISTING FIELDS (UNCHANGED) =====
     id: Number,
     name: String,
     duration: String,
     level: String,
-    fees: Number,
+    fees: {
+  type: mongoose.Schema.Types.Mixed,
+  default: null
+},
+
     eligibility: String,
     about: String,
     programType: String,
     intake: String,
     longEligibility: String,
-    admissionProcess: [{ step: Number, title: String, description: String }],
+
+    admissionProcess: [
+      {
+        step: Number,
+        title: String,
+        description: String,
+      },
+    ],
+
     highlights: [String],
     skills: [String],
-    structure: [{ year: String, topics: [String] }],
+
+    structure: [
+      {
+        year: String,
+        topics: [String],
+      },
+    ],
+
     statistics: {
       studentsEnrolled: String,
       placementRate: String,
       recruiters: String,
       ranking: String,
     },
+
+    // ===== NEW CMS LAYER (ADDITIVE) =====
+    content: CourseCMSLayerSchema,
   },
   { _id: false }
 );
+
+
+const SectionSchema = new mongoose.Schema(
+  {
+    title: String,
+    blocks: {
+      type: [ContentBlockSchema],
+      default: [],
+    },
+  },
+  { _id: false }
+);
+
 
 const PlacementsSchema = new mongoose.Schema(
   {
@@ -148,38 +431,57 @@ const ReviewSchema = new mongoose.Schema({
   source: String
 });
 
-const CollegeSchema = new mongoose.Schema(
-  {
-    id: { type: Number, index: true, unique: true },
+const CollegeSchema = new mongoose.Schema({
+  id: { type: Number, index: true, unique: true },
 
-    name: String,
-    location: String,
-    established: Number,
-    type: String,
-    stream: String,
-    rating: Number,
-    reviewCount: Number,
-    description: String,
-    highlights: [String],
-    gallery: [String],
-    courses: [CourseSchema],
-    heroImages: [String],
-    heroDownloaded: { type: Boolean, default: false },
+  name: String,
+  location: String,
+  established: Number,
+  type: String,
+  stream: String,
+  rating: Number,
+  reviewCount: Number,
+  description: {
+  type: mongoose.Schema.Types.Mixed,
+  default: ""
+},
 
-    // VERY IMPORTANT FIELD:
-    rawScraped: {
-      type: Object,
-      default: {},
-    },
+  highlights: [String],
 
+  gallery: {
+    type: [mongoose.Schema.Types.Mixed],
+    default: []
   },
-  { timestamps: true }
-);
+
+  courses: [CourseSchema],
+
+  heroImages: [String],
+  heroDownloaded: { type: Boolean, default: false },
+
+  rawScraped: {
+    type: Object,
+    default: {},
+  },
+
+  // ✅ ONLY CMS CONTENT
+  content: {
+    about: SectionSchema,
+    admission: SectionSchema,
+    placement: SectionSchema,
+    courses_fees: SectionSchema,
+    ranking: SectionSchema,
+    campus: SectionSchema,
+    scholarship: SectionSchema,
+    faq: SectionSchema,
+    reviews: SectionSchema,
+    news: SectionSchema,
+  },
+}, { timestamps: true });
 
 
 CollegeSchema.index({ name: "text", location: 1 });
 
-const College = mongoose.model("college", CollegeSchema);
+const College = mainConn.model("college", CollegeSchema);
 
 
 const ExamSchema = new mongoose.Schema(
@@ -296,7 +598,7 @@ const ExamSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const Exam = mongoose.model("exam", ExamSchema);
+const Exam = mainConn.model("exam", ExamSchema);
 
 
 const EventSchema = new mongoose.Schema(
@@ -312,7 +614,7 @@ const EventSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-const Event = mongoose.model("event", EventSchema);
+const Event = mainConn.model("event", EventSchema);
 
 
 const TestimonialSchema = new mongoose.Schema(
@@ -325,7 +627,7 @@ const TestimonialSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-const Testimonial = mongoose.model("testimonial", TestimonialSchema);
+const Testimonial = mainConn.model("testimonial", TestimonialSchema);
 
 const BlogSchema = new mongoose.Schema(
   {
@@ -340,7 +642,7 @@ const BlogSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-const Blog = mongoose.model("blog", BlogSchema);
+const Blog = mainConn.model("blog", BlogSchema);
 
 
 const RegistrationSchema = new mongoose.Schema(
@@ -350,11 +652,12 @@ const RegistrationSchema = new mongoose.Schema(
     email: String,
     phone: String,
     course: String,
+    city:String,
   },
   { timestamps: true }
 );
 
-const Registration = mongoose.model("registration", RegistrationSchema);
+const Registration = mainConn.model("registration", RegistrationSchema);
 
 
 
@@ -369,7 +672,7 @@ const ContactSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const Contact = mongoose.model("contact", ContactSchema);
+const Contact = mainConn.model("contact", ContactSchema);
 
 
 
@@ -654,7 +957,9 @@ app.post(
         imageUrl,
         logoUrl,
         gallery: galleryUrls,
+        rawScraped: req.body.rawScraped || {}
       });
+
 
       const saved = await college.save();
 
@@ -701,8 +1006,8 @@ app.get(
 
       const ranking2025 = Array.isArray(c.rawScraped?.ranking_data)
         ? c.rawScraped.ranking_data.find(r =>
-            r.ranking?.includes("2025")
-          )?.ranking ?? null
+          r.ranking?.includes("2025")
+        )?.ranking ?? null
         : null;
 
       return {
@@ -747,17 +1052,50 @@ app.get(
   })
 );
 
-// Update
 app.put(
-  "/api/colleges/:id",
+  "/api/colleges/:id/hero-image",
+  upload.single("file"),
   asyncHandler(async (req, res) => {
-    if (req.body.courses && Array.isArray(req.body.courses)) {
-      req.body.courses = req.body.courses.map((c) => ({ ...c, id: c.id || generateId() }));
+    const collegeId = Number(req.params.id);
+    const { heroMode, heroImage } = req.body;
+
+    let finalUrl = null;
+
+    // CASE 1️⃣: URL pasted
+    if (heroMode === "url") {
+      if (!heroImage || !heroImage.startsWith("https://")) {
+        return sendError(res, "Only HTTPS image URLs allowed");
+      }
+      finalUrl = heroImage;
     }
-    const updated = await College.findOneAndUpdate({ id: Number(req.params.id) }, req.body, { new: true });
-    if (!updated) return sendError(res, "College not found", 404);
-    emit("college:updated", updated);
-    res.json({ success: true, data: updated });
+
+    // CASE 2️⃣: File uploaded
+    if (heroMode === "upload" && req.file) {
+      const uploaded = await cloudinary.uploader.upload(req.file.path, {
+        folder: "studycups/colleges/hero"
+      });
+      finalUrl = uploaded.secure_url;
+      fs.unlinkSync(req.file.path);
+    }
+
+    if (!finalUrl) {
+      return sendError(res, "Hero image not provided");
+    }
+
+    await College.updateOne(
+      { id: collegeId },
+      {
+        $set: {
+          heroImages: [finalUrl],
+          heroDownloaded: true
+        }
+      }
+    );
+
+    res.json({
+      success: true,
+      heroImage: finalUrl
+    });
   })
 );
 
@@ -879,9 +1217,9 @@ app.get(
     // 2️⃣ Regex safe banana (dot, spaces, case issue fix)
     const nameRegex = new RegExp(
       "^" +
-        slug
-          .replace(/\./g, "\\.")     // dot fix
-          .replace(/\s+/g, "\\s*")   // space flexible
+      slug
+        .replace(/\./g, "\\.")     // dot fix
+        .replace(/\s+/g, "\\s*")   // space flexible
       + "$",
       "i" // case-insensitive
     );
@@ -1117,14 +1455,52 @@ app.get(
 );
 
 app.put(
-  "/api/blogs/:id",
+  "/api/colleges/:id",
   asyncHandler(async (req, res) => {
-    const updated = await Blog.findOneAndUpdate({ id: Number(req.params.id) }, req.body, { new: true });
-    if (!updated) return sendError(res, "Blog not found", 404);
-    emit("blog:updated", updated);
-    res.json({ success: true, data: updated });
+
+    // ✅ CMS ABOUT BLOCKS
+    if (Array.isArray(req.body?.content?.about?.blocks)) {
+      req.body.content.about.blocks =
+        req.body.content.about.blocks.map((block, index) => ({
+          type: block.type,
+          data: block.data,
+          order: index,
+          source: block.source || "manual"
+        }));
+    }
+
+    // ✅ COURSES ID SAFETY
+    if (Array.isArray(req.body.courses)) {
+      req.body.courses = req.body.courses.map(c => ({
+        ...c,
+        id: c.id || generateId()
+      }));
+    }
+
+    const updated = await College.findOneAndUpdate(
+      { id: Number(req.params.id) },
+      { $set: req.body },
+      { new: true, runValidators: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({
+        success: false,
+        message: "College not found"
+      });
+    }
+
+    emit("college:updated", updated);
+
+    res.json({
+      success: true,
+      message: "College updated successfully",
+      data: updated
+    });
   })
 );
+
+
 
 app.delete(
   "/api/blogs/:id",
@@ -1209,6 +1585,280 @@ app.get(
 app.use((err, req, res, next) => {
   console.error("Unhandled Error:", err);
   sendError(res, err.message || "Server Error", 500);
+});
+
+app.get("/api/scrape/result/:id", async (req, res) => {
+  try {
+    const tempCollection = tempConn.collection("college_course_test");
+
+    const data = await tempCollection.findOne({
+      _id: new mongoose.Types.ObjectId(req.params.id)
+    });
+
+    if (!data) {
+      return res.status(404).json({ success: false });
+    }
+
+    // internal fields clean
+    delete data.__v;
+
+    res.json({
+      success: true,
+      data
+    });
+
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+
+// ================= MIGRATE TEMP → REAL DB =================
+app.post("/api/scrape/migrate/:tempId", async (req, res) => {
+  try {
+    const tempId = req.params.tempId;
+
+    /* ================= 1️⃣ TEMP COLLECTION ================= */
+    const tempCollection = tempConn.collection("college_course_test");
+
+    const tempDoc = await tempCollection.findOne({
+      _id: new mongoose.Types.ObjectId(tempId),
+    });
+
+    if (!tempDoc) {
+      return res.status(404).json({
+        success: false,
+        error: "Temp document not found",
+      });
+    }
+
+    /* ================= 2️⃣ CLEAN RAW COPY ================= */
+    const raw = { ...tempDoc };
+    delete raw._id;
+    delete raw.__v;
+
+    /* ================= 3️⃣ NAME NORMALIZATION ================= */
+    const collegeName =
+      (raw.full_name || raw.college_name || "")
+        .replace(/Fees.*|Admission.*|Courses.*|Cutoff.*|Ranking.*|Placement.*/gi, "")
+        .trim();
+
+    /* ================= 4️⃣ BUILD REAL DB DOC ================= */
+    const collegeDoc = {
+      id: Date.now(),
+
+      /* CORE */
+      name: collegeName,
+      full_name: raw.full_name || raw.college_name || "",
+      location: raw.location || "",
+      established: raw.estd_year ? Number(raw.estd_year) : null,
+      type: raw.college_type || "",
+
+      /* RATINGS */
+      rating: raw.rating ? Number(raw.rating) : null,
+      reviewCount: raw.review_count
+        ? Number(String(raw.review_count).replace(/\D/g, ""))
+        : 0,
+
+      /* CONTENT */
+      description: raw.about_text || "",
+      highlights: Array.isArray(raw.about_list) ? raw.about_list : [],
+
+      /* MEDIA */
+      gallery: Array.isArray(raw.gallery)
+        ? raw.gallery.map(g => (typeof g === "string" ? g : g.image)).filter(Boolean)
+        : [],
+
+     heroImages: Array.isArray(raw.heroImages)
+  ? raw.heroImages.filter(isValidImageUrl)
+  : [],
+
+
+      heroDownloaded: !!raw.hero_generated,
+
+      /* COURSES (NORMALIZED BUT SAFE) */
+      courses: Array.isArray(raw.courses)
+        ? raw.courses.map(course => ({
+            id: Date.now() + Math.floor(Math.random() * 1000),
+            name: course.name || "",
+            duration: course.duration || "",
+            level: course.level || "",
+            fees: parseFees(course.fees),
+            eligibility: course.eligibility || "",
+            about: course.about || "",
+            programType: course.mode || "",
+            intake: course.intake || "",
+            admissionProcess: course.admissionProcess || [],
+            highlights: course.highlights || [],
+            skills: course.skills || [],
+            structure: course.structure || [],
+            statistics: course.statistics || {},
+            content: {}, // CMS layer empty (manual editing ke liye)
+          }))
+        : [],
+
+      /* 🔐 MOST IMPORTANT: FULL RAW BACKUP */
+      rawScraped: raw,
+    };
+
+    /* ================= 5️⃣ UPSERT INTO REAL DB ================= */
+    await College.updateOne(
+      { name: collegeDoc.name, location: collegeDoc.location },
+      { $set: collegeDoc },
+      { upsert: true }
+    );
+
+    /* ================= 6️⃣ SUCCESS ================= */
+    res.json({
+      success: true,
+      message: "College migrated successfully",
+      collegeName: collegeDoc.name,
+    });
+
+  } catch (err) {
+    console.error("❌ MIGRATION ERROR:", err);
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  }
+}); 
+
+app.patch("/api/temp/college/update-field/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { path, value } = req.body;
+
+    if (!path) {
+      return res.status(400).json({
+        success: false,
+        message: "Field path is required",
+      });
+    }
+
+    const updateQuery = {
+      $set: {
+        [path]: value,
+        updatedAt: new Date(),
+      },
+    };
+
+    const result = await tempConn
+      .collection("college_course_test")
+      .updateOne(
+        { _id: new mongoose.Types.ObjectId(id) },
+        updateQuery
+      );
+
+    res.json({
+      success: true,
+      message: "Field updated in temp DB",
+      modifiedCount: result.modifiedCount,
+    });
+
+  } catch (err) {
+    console.error("❌ TEMP FIELD UPDATE ERROR:", err);
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  }
+});
+
+
+
+
+app.post("/api/scrape/start", async (req, res) => {
+  const { url } = req.body;
+
+  if (!url) {
+    return res.status(400).json({
+      success: false,
+      error: "URL is required"
+    });
+  }
+
+  try {
+    console.log("🔹 Scrape start for:", url);
+
+    /* ======================================================
+       1️⃣ RUN PYTHON SCRAPER
+       - Python saves data into TEMP DB (studycups)
+       - Python returns inserted _id
+    ====================================================== */
+    const tempId = await runPythonScraper(url);
+
+    emit("scrape:status", {
+      step: "scraping",
+      status: "done"
+    });
+
+    /* ======================================================
+       2️⃣ FETCH TEMP DOCUMENT FROM TEMP DB ONLY
+    ====================================================== */
+    const tempCollection = tempConn.collection("college_course_test");
+
+    console.log(" SEARCHING TEMP ID (studycups):", tempId);
+
+    const tempDoc = await tempCollection.findOne({
+      _id: new mongoose.Types.ObjectId(tempId)
+    });
+
+    if (!tempDoc) {
+      throw new Error("Temp document not found in studycups DB");
+    }
+
+    console.log(" TEMP DOC FOUND ✅");
+
+    /* ======================================================
+       3️⃣ GENERATE HERO IMAGE (USING SAME _id)
+    ====================================================== */
+    let heroImageUrl = null;
+
+    try {
+      const output = await runCommand(
+        `node generateCollegeImages.js ${tempDoc._id.toString()}`
+      );
+
+      heroImageUrl = output?.trim() || null;
+    } catch (imgErr) {
+      console.warn("Hero image generation failed:", imgErr.message);
+    }
+
+    /* ======================================================
+       4️⃣ UPDATE SAME TEMP DOCUMENT
+    ====================================================== */
+    if (heroImageUrl) {
+      await tempCollection.updateOne(
+        { _id: tempDoc._id },
+        {
+          $set: {
+            hero_image: heroImageUrl,
+            hero_generated: true
+          }
+        }
+      );
+    }
+
+    /* ======================================================
+       5️⃣ RETURN TEMP ID TO FRONTEND
+    ====================================================== */
+    return res.json({
+      success: true,
+      tempId: tempDoc._id.toString()
+    });
+
+  } catch (err) {
+    console.error("Scrape start failed:", err);
+
+    return res.status(500).json({
+      success: false,
+      error: err.message || "Scraping failed"
+    });
+  }
 });
 
 
