@@ -99,17 +99,12 @@ function parseFees(value) {
   const num = parseFloat(clean);
   return isNaN(num) ? null : num;
 }
-const listCache = new Map();
-const collegeCache = new Map();
 
 
 const app = express(); 
 app.set("trust proxy", 1);
 
 app.use(express.json({ limit: "5mb" })); 
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
-});
 
 app.use(express.urlencoded({ extended: true, limit: "5mb" }));
 
