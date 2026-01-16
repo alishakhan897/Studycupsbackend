@@ -99,12 +99,18 @@ function parseFees(value) {
   const num = parseFloat(clean);
   return isNaN(num) ? null : num;
 }
+const listCache = new Map();
+const collegeCache = new Map();
 
 
 const app = express(); 
 app.set("trust proxy", 1);
 
-app.use(express.json({ limit: "5mb" }));
+app.use(express.json({ limit: "5mb" })); 
+app.get("/health", (req, res) => {
+  res.json({ status: "ok" });
+});
+
 app.use(express.urlencoded({ extended: true, limit: "5mb" }));
 
 // ================== CORS FIX (FINAL) ==================
@@ -984,63 +990,45 @@ app.post(
 
 
 
-app.get(
-  "/api/colleges",
-  asyncHandler(async (req, res) => {
+app.get("/api/colleges", asyncHandler(async (req, res) => {
 
-    // ✅ DEFAULT: return ALL colleges (up to 100)
-    const page = Math.max(parseInt(req.query.page) || 1, 1);
-    const limit = Math.min(parseInt(req.query.limit) || 100, 100);
+  const cacheKey = JSON.stringify(req.query);
 
-    // optional text search
-    const q = req.query.q
-      ? { $text: { $search: req.query.q } }
-      : {};
+  if (listCache.has(cacheKey)) {
+    return res.json(listCache.get(cacheKey));
+  }
 
-    // fetch data
-    let data = await College.find(q)
-      .sort({ rating: -1, createdAt: -1 }) // optional: better ordering
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
+  const page = Math.max(parseInt(req.query.page) || 1, 1);
+  const limit = Math.min(parseInt(req.query.limit) || 100, 100);
 
-    // normalize data for frontend
-    data = data.map(c => {
+  const q = req.query.q
+    ? { $text: { $search: req.query.q } }
+    : {};
 
-      const ranking2025 = Array.isArray(c.rawScraped?.ranking_data)
-        ? c.rawScraped.ranking_data.find(r =>
-          r.ranking?.includes("2025")
-        )?.ranking ?? null
-        : null;
+  const data = await College.find(q)
+    .sort({ rating: -1, createdAt: -1 })
+    .skip((page - 1) * limit)
+    .limit(limit)
+    .lean();
 
-      return {
-        ...c,
+  const total = await College.countDocuments(q);
 
-        // hero image
-        imageUrl: c.heroImages?.[0] ?? null,
+  const response = {
+    success: true,
+    page,
+    limit,
+    total,
+    data
+  };
 
-        // logo
-        logoUrl: c.rawScraped?.logo ?? null,
+  listCache.set(cacheKey, response);
 
-        // normalize fields
-        type: c.type ?? null,
-        stream: c.rawScraped?.stream ?? null,
-        ranking: ranking2025,
-        feesRange: c.rawScraped?.feesRange ?? null,
-      };
-    });
+  // 5 min baad cache clear
+  setTimeout(() => listCache.delete(cacheKey), 5 * 60 * 1000);
 
-    const total = await College.countDocuments(q);
+  res.json(response);
+}));
 
-    res.json({
-      success: true,
-      page,
-      limit,
-      total,
-      data,
-    });
-  })
-);
 
 
 
