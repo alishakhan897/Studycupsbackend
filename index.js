@@ -990,45 +990,63 @@ app.post(
 
 
 
-app.get("/api/colleges", asyncHandler(async (req, res) => {
+app.get(
+  "/api/colleges",
+  asyncHandler(async (req, res) => {
 
-  const cacheKey = JSON.stringify(req.query);
+    // ✅ DEFAULT: return ALL colleges (up to 100)
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 100, 100);
 
-  if (listCache.has(cacheKey)) {
-    return res.json(listCache.get(cacheKey));
-  }
+    // optional text search
+    const q = req.query.q
+      ? { $text: { $search: req.query.q } }
+      : {};
 
-  const page = Math.max(parseInt(req.query.page) || 1, 1);
-  const limit = Math.min(parseInt(req.query.limit) || 100, 100);
+    // fetch data
+    let data = await College.find(q)
+      .sort({ rating: -1, createdAt: -1 }) // optional: better ordering
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
 
-  const q = req.query.q
-    ? { $text: { $search: req.query.q } }
-    : {};
+    // normalize data for frontend
+    data = data.map(c => {
 
-  const data = await College.find(q)
-    .sort({ rating: -1, createdAt: -1 })
-    .skip((page - 1) * limit)
-    .limit(limit)
-    .lean();
+      const ranking2025 = Array.isArray(c.rawScraped?.ranking_data)
+        ? c.rawScraped.ranking_data.find(r =>
+          r.ranking?.includes("2025")
+        )?.ranking ?? null
+        : null;
 
-  const total = await College.countDocuments(q);
+      return {
+        ...c,
 
-  const response = {
-    success: true,
-    page,
-    limit,
-    total,
-    data
-  };
+        // hero image
+        imageUrl: c.heroImages?.[0] ?? null,
 
-  listCache.set(cacheKey, response);
+        // logo
+        logoUrl: c.rawScraped?.logo ?? null,
 
-  // 5 min baad cache clear
-  setTimeout(() => listCache.delete(cacheKey), 5 * 60 * 1000);
+        // normalize fields
+        type: c.type ?? null,
+        stream: c.rawScraped?.stream ?? null,
+        ranking: ranking2025,
+        feesRange: c.rawScraped?.feesRange ?? null,
+      };
+    });
 
-  res.json(response);
-}));
+    const total = await College.countDocuments(q);
 
+    res.json({
+      success: true,
+      page,
+      limit,
+      total,
+      data,
+    });
+  })
+);
 
 
 
