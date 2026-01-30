@@ -678,6 +678,65 @@ const ContactSchema = new mongoose.Schema(
 
 const Contact = mainConn.model("contact", ContactSchema);
 
+// ================= TOP COURSE CATEGORIES =================
+const TOP_COURSES = [
+  {
+    name: "B.E / B.Tech",
+    stream: "Engineering",
+    keywords: ["btech", "b.tech", "be", "engineering"]
+  },
+  {
+    name: "MBA / PGDM",
+    stream: "MBA",
+    keywords: ["mba", "pgdm", "management", "business administration"]
+  },
+  {
+    name: "MBBS",
+    stream: "Medical",
+    keywords: ["mbbs"]
+  },
+  {
+    name: "BCA",
+    stream: "IT",
+    keywords: ["bca"]
+  },
+  {
+    name: "B.Com",
+    stream: "Commerce",
+    keywords: ["bcom", "b.com", "commerce"]
+  },
+  {
+    name: "B.Sc",
+    stream: "Science",
+    keywords: ["bsc", "b.sc", "bachelor of science"]
+  },
+  {
+    name: "BA",
+    stream: "Arts",
+    keywords: ["ba", "b.a", "bachelor of arts"]
+  },
+  {
+    name: "BBA",
+    stream: "Management",
+    keywords: ["bba"]
+  },
+  {
+    name: "M.E / M.Tech",
+    stream: "Engineering",
+    keywords: ["mtech", "m.tech", "me"]
+  },
+  {
+    name: "MCA",
+    stream: "IT",
+    keywords: ["mca"]
+  },
+  {
+    name: "B.Ed",
+    stream: "Education",
+    keywords: ["bed", "b.ed"]
+  }
+];
+
 
 
 const server = http.createServer(app);
@@ -1044,7 +1103,23 @@ app.get(
 );
 
 
+app.get("/api/colleges/list", asyncHandler(async (req, res) => {
+  const colleges = await College.find(
+    {},
+    {
+      id: 1,
+      name: 1,
+      location: 1,
+      rating: 1,
+      type: 1,
+      createdAt: 1
+    }
+  )
+    .sort({ createdAt: -1 })
+    .lean();
 
+  res.json({ success: true, data: colleges });
+}));
 
 // Read single
 app.get(
@@ -1281,6 +1356,115 @@ app.get(
 );
 
 
+
+// ================= MEGA MENU – INIT =================
+app.get(
+  "/api/megamenu/init",
+  asyncHandler(async (req, res) => {
+
+    /* ---------- UNIQUE COURSES (12) ---------- */
+   const courses = TOP_COURSES.map(c => ({
+  name: c.name,
+  stream: c.stream
+}));
+
+
+
+    /* ---------- TOP COLLEGES (DEFAULT) ---------- */
+    const colleges = await College.find({})
+      .sort({ rating: -1 })
+      .limit(12)
+      .select("id name location rating")
+      .lean();
+
+    /* ---------- TOP EXAMS (DEFAULT) ---------- */
+    const exams = await Exam.find({})
+      .limit(6)
+      .select("id name stream")
+      .lean();
+
+    res.json({
+      success: true,
+      courses,
+      colleges,
+      exams
+    });
+  })
+);
+
+// ================= MEGA MENU – COURSE HOVER =================
+app.get("/api/megamenu/course", asyncHandler(async (req, res) => {
+  const { name } = req.query;
+
+  const courseConfig = TOP_COURSES.find(c => c.name === name);
+  if (!courseConfig) {
+    return res.json({ success: true, colleges: [], exams: [] });
+  }
+
+  // 🔥 STRONG COURSE NAME REGEX (REAL DATA FRIENDLY)
+  let courseRegex;
+
+  switch (courseConfig.name) {
+    case "B.E / B.Tech":
+      courseRegex = /(b\.?\s?tech|bachelor of technology|b\.?\s?e)/i;
+      break;
+
+    case "MBA / PGDM":
+      courseRegex = /(mba|pgdm|post graduate programme|management)/i;
+      break;
+
+    case "MBBS":
+      courseRegex = /(mbbs|medicine|medical)/i;
+      break;
+
+    case "B.Sc":
+      courseRegex = /(b\.?\s?sc|bs|bachelor of science)/i;
+      break;
+
+    case "BCA":
+      courseRegex = /(bca|computer application)/i;
+      break;
+
+    case "B.Com":
+      courseRegex = /(b\.?\s?com|commerce)/i;
+      break;
+
+    default:
+      courseRegex = new RegExp(courseConfig.name, "i");
+  }
+
+  // ✅ MAIN FIX: MATCH ONLY ON courses.name
+  const colleges = await College.find({
+    courses: {
+      $elemMatch: {
+        name: courseRegex
+      }
+    }
+  })
+    .sort({ rating: -1 })
+    .limit(12)
+    .select("id name rating location")
+    .lean();
+
+  const exams = await Exam.find({
+    stream: new RegExp(courseConfig.stream, "i")
+  })
+    .limit(6)
+    .select("id name")
+    .lean();
+
+  res.json({
+    success: true,
+    colleges,
+    exams
+  });
+}));
+
+
+
+
+
+
 // --- Exams ---
 app.post(
   "/api/exams",
@@ -1290,6 +1474,9 @@ app.post(
     res.status(201).json({ success: true, data: exam });
   })
 );
+// ================= MEGA MENU HELPERS =================
+const normalizeStream = (stream) =>
+  stream?.toLowerCase().trim();
 
 app.get(
   "/api/exams",
@@ -1619,6 +1806,29 @@ app.get("/api/scrape/result/:id", async (req, res) => {
   }
 });
 
+// ================= COURSES LIST (FAST, AGGREGATED) =================
+app.get("/api/courses/list", asyncHandler(async (req, res) => {
+  const courses = await College.aggregate([
+    { $unwind: "$courses" },
+
+    {
+      $group: {
+        _id: "$courses.name",
+        name: { $first: "$courses.name" },
+        level: { $first: "$courses.level" },
+        stream: { $first: "$stream" },
+        totalColleges: { $sum: 1 }
+      }
+    },
+
+    { $sort: { totalColleges: -1 } }
+  ]);
+
+  res.json({
+    success: true,
+    data: courses
+  });
+}));
 
 // ================= MIGRATE TEMP → REAL DB =================
 app.post("/api/scrape/migrate/:tempId", async (req, res) => {
@@ -1864,6 +2074,208 @@ app.post("/api/scrape/start", async (req, res) => {
     });
   }
 });
+
+app.get(
+  "/api/dashboard/stats",
+  asyncHandler(async (req, res) => {
+
+    // ---------- COUNTS ----------
+    const [
+      collegesCount,
+      examsCount,
+      blogsCount,
+      eventsCount,
+      contactsCount,
+      registrationsCount,
+    ] = await Promise.all([
+      College.countDocuments(),
+      Exam.countDocuments(),
+      Blog.countDocuments(),
+      Event.countDocuments(),
+      Contact.countDocuments(),
+      Registration.countDocuments(),
+    ]);
+
+    // ---------- UNIQUE COURSES ----------
+   const courseAgg = await College.aggregate([
+  {
+    $project: {
+      courses: { $ifNull: ["$rawScraped.courses", []] }
+    }
+  },
+  { $unwind: "$courses" },
+
+  // 🔑 NORMALIZE COURSE NAME
+  {
+    $addFields: {
+      normalizedName: {
+        $trim: {
+          input: {
+            $toLower: {
+              $replaceAll: {
+                input: "$courses.name",
+                find: ".",
+                replacement: ""
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+
+  // 🔑 GROUP BY NORMALIZED NAME
+  {
+    $group: {
+      _id: "$normalizedName"
+    }
+  },
+
+  // 🔢 COUNT UNIQUE
+  {
+    $count: "total"
+  }
+]);
+
+const coursesCount = courseAgg[0]?.total || 0;
+
+
+    // ---------- MONTHLY ENQUIRIES (CONTACT + REGISTRATION) ----------
+    const [contactMonthly, registrationMonthly] = await Promise.all([
+      Contact.aggregate([
+        {
+          $group: {
+            _id: { $month: "$createdAt" },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      Registration.aggregate([
+        {
+          $group: {
+            _id: { $month: "$createdAt" },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    // merge both
+    const monthMap = Array(12).fill(0);
+
+    contactMonthly.forEach(m => {
+      monthMap[m._id - 1] += m.count;
+    });
+
+    registrationMonthly.forEach(m => {
+      monthMap[m._id - 1] += m.count;
+    });
+
+    const months = [
+      "Jan","Feb","Mar","Apr","May","Jun",
+      "Jul","Aug","Sep","Oct","Nov","Dec"
+    ];
+
+    const monthlyEnquiries = months.map((name, i) => ({
+      name,
+      enquiries: monthMap[i],
+    }));
+
+    // ---------- RESPONSE ----------
+    res.json({
+      success: true,
+      stats: {
+        colleges: collegesCount,
+        courses: coursesCount,
+        exams: examsCount,
+        blogs: blogsCount,
+        enquiries: contactsCount + registrationsCount,
+        events: eventsCount,
+      },
+      monthlyEnquiries,
+    });
+  })
+);
+
+
+
+app.get("/api/courses/all", asyncHandler(async (req, res) => {
+  const courses = await College.aggregate([
+    {
+      $project: {
+        collegeStream: {
+          $ifNull: [
+            "$stream",
+            { $ifNull: ["$rawScraped.stream", "$rawScraped.college_type"] }
+          ]
+        },
+        courses: { $ifNull: ["$rawScraped.courses", []] }
+      }
+    },
+
+    { $unwind: "$courses" },
+
+    {
+      $addFields: {
+        stream: {
+          $cond: [
+            { $ne: ["$collegeStream", null] },
+            "$collegeStream",
+
+            // fallback: infer from course name
+            {
+              $switch: {
+                branches: [
+                  {
+                    case: { $regexMatch: { input: "$courses.name", regex: /b\.?\s?tech|engineering/i } },
+                    then: "Engineering"
+                  },
+                  {
+                    case: { $regexMatch: { input: "$courses.name", regex: /mba|management|pgdm/i } },
+                    then: "Management"
+                  },
+                  {
+                    case: { $regexMatch: { input: "$courses.name", regex: /mbbs|medical/i } },
+                    then: "Medical"
+                  },
+                  {
+                    case: { $regexMatch: { input: "$courses.name", regex: /law|llb/i } },
+                    then: "Law"
+                  }
+                ],
+                default: "General"
+              }
+            }
+          ]
+        }
+      }
+    },
+
+    {
+      $group: {
+        _id: { name: { $trim: { input: "$courses.name" } } },
+
+        name: { $first: "$courses.name" },
+        duration: { $first: "$courses.duration" },
+        mode: { $first: "$courses.mode" },
+        stream: { $first: "$stream" },
+
+        totalColleges: { $sum: 1 }
+      }
+    },
+
+    { $sort: { name: 1 } }
+  ]);
+
+  res.json({
+    success: true,
+    total: courses.length,
+    data: courses
+  });
+}));
+
+
+
 
 
 
