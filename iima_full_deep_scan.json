@@ -1,0 +1,37 @@
+{
+    "identity": {
+        "college_name": "IIM Ahmedabad PG, Doctorate, Certificate Courses 2025",
+        "location": "Ahmedabad",
+        "rating": null,
+        "logo": null,
+        "ownership": null
+    },
+    "courses": [
+        {
+            "course_name": "MBA/PGDM",
+            "tuition_fees": "27.5 L\n",
+            "eligibility": "Graduation : 50 % Exams : CATGATE"
+        },
+        {
+            "course_name": "Executive MBA/PGDM",
+            "tuition_fees": "35 L\n",
+            "eligibility": "\u2013 / \u2013"
+        },
+        {
+            "course_name": "Certificate",
+            "tuition_fees": "1.3 L - 1.5 L\n",
+            "eligibility": "Graduation : 50 % Exams : CAT"
+        },
+        {
+            "course_name": "Ph.D.",
+            "tuition_fees": "\u2013 / \u2013",
+            "eligibility": "Exams : CATGATE+2 More"
+        },
+        {
+            "course_name": "MMS",
+            "tuition_fees": "20 L\n",
+            "eligibility": "Graduation : 50 % Exams : CAT"
+        }
+    ],
+    "placements": {}
+}

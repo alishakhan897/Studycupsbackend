@@ -1043,6 +1043,83 @@ app.post(
 );
 
 
+app.get("/sitemap.xml", async (req, res) => {
+  try {
+    const BASE_URL = "https://studycups.in";
+
+    // Static pages
+    const staticUrls = [
+      "/",
+      "/landing",
+      "/colleges",
+      "/courses",
+      "/blog",
+      "/exams",
+    ].map((p) => `${BASE_URL}${p}`);
+
+    // College/university pages
+    const colleges = await College.find({}, { id: 1, name: 1 }).lean();
+    const collegeUrls = colleges.map(
+      (c) => `${BASE_URL}/university/${c.id}-${encodeURIComponent(c.name.toLowerCase().replace(/\s+/g, "-"))}`
+    );
+
+    // Courses pages — unique courses grouped by category
+    const coursesAgg = await College.aggregate([
+      { $unwind: "$courses" },
+      {
+        $group: {
+          _id: {
+            category: "$courses.stream", // assuming this is category
+            slug: "$courses.name",
+          },
+        },
+      },
+    ]);
+
+    const courseUrls = coursesAgg.map((c) =>
+      `${BASE_URL}/courses/${encodeURIComponent(
+        c._id.category.toLowerCase().replace(/\s+/g, "-")
+      )}/${encodeURIComponent(
+        c._id.slug.toLowerCase().replace(/\s+/g, "-")
+      )}`
+    );
+
+    // Blog pages
+    const blogs = await Blog.find({}, { id: 1, title: 1 }).lean();
+    const blogUrls = blogs.map(
+      (b) => `${BASE_URL}/blog/${b.id}-${encodeURIComponent(b.title.toLowerCase().replace(/\s+/g, "-"))}`
+    );
+
+    const allUrls = [
+      ...staticUrls,
+      ...collegeUrls,
+      ...courseUrls,
+      ...blogUrls,
+    ];
+
+    const sitemap = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${allUrls
+  .map(
+    (url) => `
+  <url>
+    <loc>${url}</loc>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>`
+  )
+  .join("")}
+</urlset>`;
+
+    res.header("Content-Type", "application/xml");
+    res.send(sitemap);
+  } catch (err) {
+    console.error("❌ Sitemap error:", err);
+    res.status(500).send("Sitemap generation failed");
+  }
+});
+
+
 
 app.get(
   "/api/colleges",
