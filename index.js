@@ -15,6 +15,8 @@ import fs from "fs";
 import Parser from "rss-parser";
 const parser = new Parser();
 import { exec } from "child_process";
+import fetch from "node-fetch";
+
 
 
 const mainConn = mongoose.createConnection(
