@@ -168,29 +168,37 @@ console.log("🟢 NODE MONGO_URI:", process.env.MONGO_URI);
 
 
 const runPythonScraperViaAPI = async (url) => {
-  const response = await fetch(
-    `${process.env.PYTHON_SCRAPER_URL}/scrape`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ url }),
-      signal: AbortSignal.timeout(300000)
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 600000); // 10 minutes timeout
+
+    const response = await fetch(
+      `${process.env.PYTHON_SCRAPER_URL}/scrape`, 
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        body: JSON.stringify({ url }),
+        signal: controller.signal
+      }
+    );
+
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("Python API Error Response:", errorText);
+      throw new Error(`Python API failed: ${response.status}`);
     }
-  );
 
-  if (!response.ok) {
-    throw new Error(`Python API failed with ${response.status}`);
+    const data = await response.json();
+    return data.data; 
+  } catch (err) {
+    console.error("Fetch Exception:", err.message);
+    throw err;
   }
-
-  const data = await response.json();
-
-  if (!data?.success) {
-    throw new Error("Python scraper returned failure");
-  }
-
-  return data.data; // ✅ PURE SCRAPED JSON
 };
 
 
