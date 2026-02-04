@@ -162,30 +162,7 @@ mongoose
 
 console.log("🟢 NODE MONGO_URI:", process.env.MONGO_URI);
 
-const runPythonScraper = (url) => {
-  return new Promise((resolve, reject) => {
-    exec(
-      `py -3 detailed_scraping.py "${url}"`,
-      { maxBuffer: 1024 * 1024 * 100 }, // 100MB
-      (error, stdout, stderr) => {
-        if (error) {
-          return reject(error);
-        }
 
-        const insertedId = stdout.trim();
-
-        console.log("PYTHON STDOUT:", insertedId);
-
-        if (!insertedId || insertedId.length < 10) {
-          reject("Invalid temp id from python");
-        } else {
-          resolve(insertedId); // ✅ ONLY _id
-        }
-
-      }
-    );
-  });
-};
 
 const runCommand = (command) => {
   return new Promise((resolve, reject) => {
@@ -199,6 +176,30 @@ const runCommand = (command) => {
   });
 };
 
+const runPythonScraperViaAPI = async (url) => {
+  const response = await fetch(
+    `${process.env.PYTHON_SCRAPER_URL}/scrape`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ url })
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Python API failed with ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  if (!data?.success) {
+    throw new Error("Python scraper returned failure");
+  }
+
+  return data.data; // ✅ PURE SCRAPED JSON
+};
 
 
 
@@ -1047,77 +1048,90 @@ app.get("/sitemap.xml", async (req, res) => {
   try {
     const BASE_URL = "https://studycups.in";
 
-    // Static pages
-    const staticUrls = [
+    const urls = [];
+
+    /* ================= STATIC PAGES ================= */
+    [
       "/",
       "/landing",
       "/colleges",
       "/courses",
-      "/blog",
       "/exams",
-    ].map((p) => `${BASE_URL}${p}`);
+      "/blog"
+    ].forEach(p => {
+      urls.push(`${BASE_URL}${p}`);
+    });
 
-    // College/university pages
+    /* ================= COLLEGE PAGES ================= */
     const colleges = await College.find({}, { id: 1, name: 1 }).lean();
-    const collegeUrls = colleges.map(
-      (c) => `${BASE_URL}/university/${c.id}-${encodeURIComponent(c.name.toLowerCase().replace(/\s+/g, "-"))}`
-    );
 
-    // Courses pages — unique courses grouped by category
+    colleges.forEach(c => {
+      if (!c.id || !c.name) return;
+
+      const slug = c.name
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, "")
+        .replace(/\s+/g, "-");
+
+      urls.push(`${BASE_URL}/university/${c.id}-${slug}`);
+    });
+
+    /* ================= COURSE PAGES ================= */
     const coursesAgg = await College.aggregate([
       { $unwind: "$courses" },
       {
         $group: {
-          _id: {
-            category: "$courses.stream", // assuming this is category
-            slug: "$courses.name",
-          },
-        },
-      },
+          _id: "$courses.name"
+        }
+      }
     ]);
 
-    const courseUrls = coursesAgg.map((c) =>
-      `${BASE_URL}/courses/${encodeURIComponent(
-        c._id.category.toLowerCase().replace(/\s+/g, "-")
-      )}/${encodeURIComponent(
-        c._id.slug.toLowerCase().replace(/\s+/g, "-")
-      )}`
-    );
+    coursesAgg.forEach(c => {
+      if (!c._id) return;
 
-    // Blog pages
+      const slug = c._id
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, "")
+        .replace(/\s+/g, "-");
+
+      urls.push(`${BASE_URL}/courses/${slug}`);
+    });
+
+    /* ================= BLOG PAGES ================= */
     const blogs = await Blog.find({}, { id: 1, title: 1 }).lean();
-    const blogUrls = blogs.map(
-      (b) => `${BASE_URL}/blog/${b.id}-${encodeURIComponent(b.title.toLowerCase().replace(/\s+/g, "-"))}`
-    );
 
-    const allUrls = [
-      ...staticUrls,
-      ...collegeUrls,
-      ...courseUrls,
-      ...blogUrls,
-    ];
+    blogs.forEach(b => {
+      if (!b.id || !b.title) return;
 
-    const sitemap = `<?xml version="1.0" encoding="UTF-8"?>
+      const slug = b.title
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, "")
+        .replace(/\s+/g, "-");
+
+      urls.push(`${BASE_URL}/blog/${b.id}-${slug}`);
+    });
+
+    /* ================= XML ================= */
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-${allUrls
-  .map(
-    (url) => `
+${urls.map(url => `
   <url>
     <loc>${url}</loc>
     <changefreq>weekly</changefreq>
     <priority>0.8</priority>
-  </url>`
-  )
-  .join("")}
+  </url>`).join("")}
 </urlset>`;
 
-    res.header("Content-Type", "application/xml");
-    res.send(sitemap);
+    res.setHeader("Content-Type", "application/xml");
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.status(200).send(xml);
+
   } catch (err) {
     console.error("❌ Sitemap error:", err);
     res.status(500).send("Sitemap generation failed");
   }
 });
+
 
 
 
@@ -2073,84 +2087,43 @@ app.post("/api/scrape/start", async (req, res) => {
   }
 
   try {
-    console.log("🔹 Scrape start for:", url);
+    console.log("🚀 Calling Python Scraper API:", url);
 
-    /* ======================================================
-       1️⃣ RUN PYTHON SCRAPER
-       - Python saves data into TEMP DB (studycups)
-       - Python returns inserted _id
-    ====================================================== */
-    const tempId = await runPythonScraper(url);
+    /* ===============================
+       1️⃣ CALL PYTHON RENDER API
+    =============================== */
+    const scrapedData = await runPythonScraperViaAPI(url);
 
-    emit("scrape:status", {
-      step: "scraping",
-      status: "done"
-    });
-
-    /* ======================================================
-       2️⃣ FETCH TEMP DOCUMENT FROM TEMP DB ONLY
-    ====================================================== */
+    /* ===============================
+       2️⃣ SAVE INTO TEMP DB
+    =============================== */
     const tempCollection = tempConn.collection("college_course_test");
 
-    console.log(" SEARCHING TEMP ID (studycups):", tempId);
-
-    const tempDoc = await tempCollection.findOne({
-      _id: new mongoose.Types.ObjectId(tempId)
+    const result = await tempCollection.insertOne({
+      ...scrapedData,
+      sourceUrl: url,
+      status: "draft",
+      createdAt: new Date()
     });
 
-    if (!tempDoc) {
-      throw new Error("Temp document not found in studycups DB");
-    }
-
-    console.log(" TEMP DOC FOUND ✅");
-
-    /* ======================================================
-       3️⃣ GENERATE HERO IMAGE (USING SAME _id)
-    ====================================================== */
-    let heroImageUrl = null;
-
-    try {
-      const output = await runCommand(
-        `node generateCollegeImages.js ${tempDoc._id.toString()}`
-      );
-
-      heroImageUrl = output?.trim() || null;
-    } catch (imgErr) {
-      console.warn("Hero image generation failed:", imgErr.message);
-    }
-
-    /* ======================================================
-       4️⃣ UPDATE SAME TEMP DOCUMENT
-    ====================================================== */
-    if (heroImageUrl) {
-      await tempCollection.updateOne(
-        { _id: tempDoc._id },
-        {
-          $set: {
-            hero_image: heroImageUrl,
-            hero_generated: true
-          }
-        }
-      );
-    }
-
-    /* ======================================================
-       5️⃣ RETURN TEMP ID TO FRONTEND
-    ====================================================== */
-    return res.json({
+    /* ===============================
+       3️⃣ RETURN TEMP ID
+    =============================== */
+    res.json({
       success: true,
-      tempId: tempDoc._id.toString()
+      tempId: result.insertedId.toString()
     });
 
   } catch (err) {
-    console.error("Scrape start failed:", err);
+    console.error("❌ SCRAPE ERROR:", err);
 
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
       error: err.message || "Scraping failed"
     });
   }
 });
+
 
 app.get(
   "/api/dashboard/stats",
