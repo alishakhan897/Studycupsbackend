@@ -14,7 +14,7 @@ import multer from "multer";
 import fs from "fs";
 import Parser from "rss-parser";
 const parser = new Parser();
-import { exec } from "child_process";
+
 import fetch from "node-fetch";
 
 
@@ -166,17 +166,6 @@ console.log("🟢 NODE MONGO_URI:", process.env.MONGO_URI);
 
 
 
-const runCommand = (command) => {
-  return new Promise((resolve, reject) => {
-    exec(command, { maxBuffer: 1024 * 1024 * 50 }, (error, stdout, stderr) => {
-      if (error) {
-        console.error(stderr);
-        return reject(error);
-      }
-      resolve(stdout);
-    });
-  });
-};
 
 const runPythonScraperViaAPI = async (url) => {
   const response = await fetch(
@@ -2091,14 +2080,14 @@ app.post("/api/scrape/start", async (req, res) => {
   try {
     console.log("🚀 Calling Python Scraper API:", url);
 
-    /* ===============================
-       1️⃣ CALL PYTHON RENDER API
-    =============================== */
+    // 1️⃣ Call Python
     const scrapedData = await runPythonScraperViaAPI(url);
 
-    /* ===============================
-       2️⃣ SAVE INTO TEMP DB
-    =============================== */
+    if (!scrapedData || typeof scrapedData !== "object") {
+      throw new Error("Invalid data from Python scraper");
+    }
+
+    // 2️⃣ Insert into TEMP DB
     const tempCollection = tempConn.collection("college_course_test");
 
     const result = await tempCollection.insertOne({
@@ -2108,10 +2097,8 @@ app.post("/api/scrape/start", async (req, res) => {
       createdAt: new Date()
     });
 
-    /* ===============================
-       3️⃣ RETURN TEMP ID
-    =============================== */
-    res.json({
+    // 3️⃣ Return tempId
+    return res.json({
       success: true,
       tempId: result.insertedId.toString()
     });
@@ -2119,12 +2106,13 @@ app.post("/api/scrape/start", async (req, res) => {
   } catch (err) {
     console.error("❌ SCRAPE ERROR:", err);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      error: err.message || "Scraping failed"
+      error: err.message
     });
   }
 });
+
 
 
 app.get(
