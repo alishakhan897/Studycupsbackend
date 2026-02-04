@@ -2077,57 +2077,37 @@ app.patch("/api/temp/college/update-field/:id", async (req, res) => {
 
 app.post("/api/scrape/start", async (req, res) => {
   const { url } = req.body;
-
   if (!url) {
-    return res.status(400).json({
-      success: false,
-      error: "URL is required"
-    });
+    return res.status(400).json({ success: false, error: "URL is required" });
   }
 
-  try {
-    const tempCollection = tempConn.collection("college_course_test");
+  const tempCollection = tempConn.collection("college_course_test");
 
-    // 1️⃣ CREATE JOB (QUEUE)
-    const job = await tempCollection.insertOne({
-      sourceUrl: url,
-      status: "queued",        // queued → processing → completed
-      progress: 0,
-      error: null,
-      createdAt: new Date()
-    });
+  // 1️⃣ create job
+  const job = await tempCollection.insertOne({
+    sourceUrl: url,
+    status: "queued",
+    progress: 0,
+    createdAt: new Date()
+  });
 
-    console.log("🧩 Scrape job created:", job.insertedId.toString());
+  // 2️⃣ trigger python (fire & forget)
+  fetch(`${process.env.PYTHON_SCRAPER_URL}/scrape`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url,
+      jobId: job.insertedId.toString()
+    })
+  }).catch(err => {
+    console.error("Python trigger failed:", err.message);
+  });
 
-    // 2️⃣ FIRE-AND-FORGET PYTHON CALL (DO NOT AWAIT)
-    fetch(`${process.env.PYTHON_SCRAPER_URL}/scrape`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        url,
-        jobId: job.insertedId.toString()
-      })
-    }).catch(err => {
-      console.error("🔥 Python trigger failed:", err.message);
-    });
-
-    // 3️⃣ RETURN IMMEDIATELY
-    return res.json({
-      success: true,
-      tempId: job.insertedId.toString(),
-      status: "queued"
-    });
-
-  } catch (err) {
-    console.error("❌ SCRAPE START ERROR:", err);
-
-    return res.status(500).json({
-      success: false,
-      error: err.message
-    });
-  }
+  // 3️⃣ return immediately
+  res.json({
+    success: true,
+    tempId: job.insertedId.toString()
+  });
 });
 
 
