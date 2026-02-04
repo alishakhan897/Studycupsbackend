@@ -175,7 +175,8 @@ const runPythonScraperViaAPI = async (url) => {
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ url })
+      body: JSON.stringify({ url }),
+      signal: AbortSignal.timeout(300000)
     }
   );
 
