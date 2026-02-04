@@ -2075,7 +2075,6 @@ app.patch("/api/temp/college/update-field/:id", async (req, res) => {
 
 
 
-
 app.post("/api/scrape/start", async (req, res) => {
   const { url } = req.body;
 
@@ -2087,33 +2086,42 @@ app.post("/api/scrape/start", async (req, res) => {
   }
 
   try {
-    console.log("🚀 Calling Python Scraper API:", url);
-
-    // 1️⃣ Call Python
-    const scrapedData = await runPythonScraperViaAPI(url);
-
-    if (!scrapedData || typeof scrapedData !== "object") {
-      throw new Error("Invalid data from Python scraper");
-    }
-
-    // 2️⃣ Insert into TEMP DB
     const tempCollection = tempConn.collection("college_course_test");
 
-    const result = await tempCollection.insertOne({
-      ...scrapedData,
+    // 1️⃣ CREATE JOB (QUEUE)
+    const job = await tempCollection.insertOne({
       sourceUrl: url,
-      status: "draft",
+      status: "queued",        // queued → processing → completed
+      progress: 0,
+      error: null,
       createdAt: new Date()
     });
 
-    // 3️⃣ Return tempId
+    console.log("🧩 Scrape job created:", job.insertedId.toString());
+
+    // 2️⃣ FIRE-AND-FORGET PYTHON CALL (DO NOT AWAIT)
+    fetch(`${process.env.PYTHON_SCRAPER_URL}/scrape`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        url,
+        jobId: job.insertedId.toString()
+      })
+    }).catch(err => {
+      console.error("🔥 Python trigger failed:", err.message);
+    });
+
+    // 3️⃣ RETURN IMMEDIATELY
     return res.json({
       success: true,
-      tempId: result.insertedId.toString()
+      tempId: job.insertedId.toString(),
+      status: "queued"
     });
 
   } catch (err) {
-    console.error("❌ SCRAPE ERROR:", err);
+    console.error("❌ SCRAPE START ERROR:", err);
 
     return res.status(500).json({
       success: false,
@@ -2121,6 +2129,7 @@ app.post("/api/scrape/start", async (req, res) => {
     });
   }
 });
+
 
 
 
