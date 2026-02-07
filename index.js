@@ -138,7 +138,6 @@ app.use(
 );
 
 
-
 app.use(
   rateLimit({
     windowMs: 60 * 1000,
@@ -163,7 +162,6 @@ mongoose
   .catch(err => console.log(err))
 
 console.log("🟢 NODE MONGO_URI:", process.env.MONGO_URI);
-
 
 
 
@@ -642,7 +640,12 @@ const BlogSchema = new mongoose.Schema(
     date: String,
     imageUrl: String,
     excerpt: String,
-    content: String,
+    content: {
+  blocks: {
+    type: Array,
+    default: []
+  }
+},
     category: String,
   },
   { timestamps: true }
@@ -1691,15 +1694,29 @@ app.delete(
   })
 );
 
+
 // --- Blogs ---
 app.post(
   "/api/blogs",
   asyncHandler(async (req, res) => {
-    const blog = await Blog.create({ ...req.body, id: generateId() });
-    emit("blog:created", blog);
-    res.status(201).json({ success: true, data: blog });
+    const blog = await Blog.create({
+      id: generateId(),   // ✅ backend id
+      title: req.body.title,
+      author: req.body.author,
+      date: req.body.date,
+      category: req.body.category,
+      imageUrl: req.body.imageUrl,
+      excerpt: req.body.excerpt,
+      content: req.body.content,
+    });
+
+    res.status(201).json({
+      success: true,
+      data: blog,
+    });
   })
 );
+
 
 app.get(
   "/api/blogs",
@@ -1885,7 +1902,7 @@ app.get("/api/scrape/result/:id", async (req, res) => {
     delete data.__v;
 
     res.json({
-      success: true,
+      status: data.status,
       data
     });
 
