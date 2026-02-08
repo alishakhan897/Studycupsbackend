@@ -102,6 +102,8 @@ function parseFees(value) {
   return isNaN(num) ? null : num;
 }
 
+// ================= BLOG IMAGE UPLOAD (TOP) =================
+
 
 const app = express(); 
 app.set("trust proxy", 1);
@@ -153,7 +155,40 @@ const upload = multer({
     fileSize: 5 * 1024 * 1024, // 5MB per image (safe)
   },
 });
+app.post(
+  "/api/blogs/upload-image",
+  upload.single("image"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({
+          success: 0,
+          message: "No image provided",
+        });
+      }
 
+      const result = await cloudinary.uploader.upload(req.file.path, {
+        folder: "studycups/blogs",
+      });
+
+      fs.unlinkSync(req.file.path);
+
+      return res.json({
+        success: 1,
+        file: {
+          url: result.secure_url,
+          public_id: result.public_id,
+        },
+      });
+    } catch (err) {
+      console.error("Blog image upload error:", err);
+      return res.status(500).json({
+        success: 0,
+        message: "Image upload failed",
+      });
+    }
+  }
+);
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => {
@@ -1694,6 +1729,8 @@ app.delete(
   })
 );
 
+// ================= BLOG IMAGE UPLOAD =================
+
 
 // --- Blogs ---
 app.post(
@@ -1804,12 +1841,56 @@ app.put(
 app.delete(
   "/api/blogs/:id",
   asyncHandler(async (req, res) => {
-    const deleted = await Blog.findOneAndDelete({ id: Number(req.params.id) });
-    if (!deleted) return sendError(res, "Blog not found", 404);
-    emit("blog:deleted", { id: Number(req.params.id) });
-    res.json({ success: true, message: "Blog deleted" });
+    const blog = await Blog.findOne({ id: Number(req.params.id) });
+
+    if (!blog) return sendError(res, "Blog not found", 404);
+
+    // 🔥 DELETE CLOUDINARY IMAGES
+    if (blog.content?.blocks?.length) {
+      for (const block of blog.content.blocks) {
+        if (block.type === "image") {
+          const publicId = block.data?.file?.public_id;
+          if (publicId) {
+            await cloudinary.uploader.destroy(publicId);
+          }
+        }
+      }
+    }
+
+    await Blog.deleteOne({ id: blog.id });
+
+    emit("blog:deleted", { id: blog.id });
+
+    res.json({
+      success: true,
+      message: "Blog + images deleted successfully",
+    });
   })
 );
+app.put(
+  "/api/blogs/:id",
+  asyncHandler(async (req, res) => {
+    const updated = await Blog.findOneAndUpdate(
+      { id: Number(req.params.id) },
+      {
+        title: req.body.title,
+        author: req.body.author,
+        category: req.body.category,
+        imageUrl: req.body.imageUrl,
+        excerpt: req.body.excerpt,
+        content: req.body.content,
+      },
+      { new: true }
+    );
+
+    if (!updated) return sendError(res, "Blog not found", 404);
+
+    emit("blog:updated", updated);
+
+    res.json({ success: true, data: updated });
+  })
+);
+
 
 
 app.post(
