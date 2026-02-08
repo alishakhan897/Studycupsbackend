@@ -683,7 +683,7 @@ const BlogSchema = new mongoose.Schema(
 },
     category: String, 
     
-htmlContent: String, 
+// htmlContent: String, 
   },
   { timestamps: true }
 );
@@ -1747,7 +1747,7 @@ app.post(
       imageUrl: req.body.imageUrl,
       excerpt: req.body.excerpt,
       content: req.body.content,
-       htmlContent: req.body.htmlContent,
+     //  htmlContent: req.body.htmlContent,
     });
 
     res.status(201).json({
