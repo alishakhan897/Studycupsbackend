@@ -681,7 +681,9 @@ const BlogSchema = new mongoose.Schema(
     default: []
   }
 },
-    category: String,
+    category: String, 
+    
+htmlContent: String, 
   },
   { timestamps: true }
 );
@@ -1745,6 +1747,7 @@ app.post(
       imageUrl: req.body.imageUrl,
       excerpt: req.body.excerpt,
       content: req.body.content,
+       htmlContent: req.body.htmlContent,
     });
 
     res.status(201).json({
@@ -1763,32 +1766,28 @@ app.get(
   })
 );
 
-app.get(
-  "/api/blogs/:id",
-  asyncHandler(async (req, res) => {
-    const { id } = req.params;
+app.get("/api/blogs/:id", asyncHandler(async (req, res) => {
+  const blogId = Number(req.params.id);
 
-    // ✅ ObjectId validation
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid blog id",
-      });
-    }
+  if (isNaN(blogId)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid blog id"
+    });
+  }
 
-    // ✅ Correct lookup
-    const blog = await Blog.findById(id);
+  const blog = await Blog.findOne({ id: blogId }).lean();
 
-    if (!blog) {
-      return res.status(404).json({
-        success: false,
-        message: "Blog not found",
-      });
-    }
+  if (!blog) {
+    return res.status(404).json({
+      success: false,
+      message: "Blog not found"
+    });
+  }
 
-    res.json({ success: true, data: blog });
-  })
-);
+  res.json({ success: true, data: blog });
+}));
+
 
 app.put(
   "/api/colleges/:id",
