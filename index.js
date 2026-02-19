@@ -943,27 +943,49 @@ async function handlePlannedQuery(plan, res) {
   });
 }
 
-app.post(
-  "/api/ai-counsellor",
-  rateLimit({ windowMs: 60 * 1000, max: 10 }),
-  asyncHandler(async (req, res) => {
-    const { query } = req.body;
-    if (!query) return sendError(res, "Query required");
+app.post("/api/chat-registration", async (req, res) => {
+  try {
+    const { name, email, phone, course, city } = req.body;
 
-    // 1️⃣ Ask AI to plan (NOT answer)
-    const plan = await planQueryWithAI(query);
-
-    // 🔐 SAFETY CHECK (ADD THIS)
-    if (!plan || !plan.intent) {
-      return res.json({
-        message: "I could not understand the question. Please rephrase."
+    if (!name || !phone) {
+      return res.status(400).json({
+        success: false,
+        message: "Name and phone are required",
       });
     }
 
-    // 2️⃣ Execute plan using DB
-    return handlePlannedQuery(plan, res);
-  })
-);
+    // Optional duplicate check
+    const existing = await Registration.findOne({ phone });
+    if (existing) {
+      return res.json({
+        success: true,
+        message: "Already registered",
+      });
+    }
+
+    const registration = new Registration({
+      name,
+      email,
+      phone,
+      course,
+      city,
+    });
+
+    await registration.save();
+
+    res.json({
+      success: true,
+      message: "Chat registration saved",
+    });
+  } catch (err) {
+    console.error("Chat Registration Error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
+  }
+});
+
 
 
 app.get(
