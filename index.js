@@ -1961,6 +1961,16 @@ const extractCollegeAffiliations = (college) => {
   return [];
 };
 
+const buildCollegeDetailPayload = (college = {}) => {
+  const sanitizedCollege = stripObjectKeyDeep(college, "header_highlights");
+
+  return {
+    ...sanitizedCollege,
+    accreditation: extractCollegeAccreditation(sanitizedCollege),
+    affiliations: extractCollegeAffiliations(sanitizedCollege),
+  };
+};
+
 const getCollegeCardData = (college) => {
   const sourceIdRaw =
     college?.source_college_id ??
@@ -2628,8 +2638,8 @@ app.get("/api/colleges", asyncHandler(async (req, res) => {
   city: c?.basic?.city || null,
   state: c?.basic?.state || null,
       college_id: card.id,
-      heroImage: card.heroImage,
-      imageUrl: card.imageUrl,
+   heroImage: card.heroImages?.[0] || null, 
+      
       ranking: card.ranking,
       rating: card.rating,
       reviewCount: card.reviewCount,
@@ -2781,6 +2791,74 @@ app.get("/api/college-course/college/:college_id", asyncHandler(async (req, res)
   });
 }));
 
+const saveCollegeCourseCmsByCollegeId = async (req, res) => {
+  const collegeId = Number(req.params.college_id);
+  if (Number.isNaN(collegeId)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid college_id",
+    });
+  }
+
+  let model = CollegeCourseCMS;
+  let total = await CollegeCourseCMS.countDocuments({ college_id: collegeId });
+
+  if (!total) {
+    model = CollegeCourseCMSSpace;
+    total = await CollegeCourseCMSSpace.countDocuments({ college_id: collegeId });
+  }
+
+  if (!total) {
+    return res.status(404).json({
+      success: false,
+      message: "College course documents not found",
+    });
+  }
+
+  const updatePayload = {
+    ...req.body,
+    college_id: collegeId,
+  };
+
+  delete updatePayload._id;
+
+  const result = await model.updateMany(
+    { college_id: collegeId },
+    { $set: updatePayload }
+  );
+
+  resetMainCourseCatalogCache();
+
+  const docs = await model.find({ college_id: collegeId })
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .lean();
+
+  res.json({
+    success: true,
+    collection: model.collection.name,
+    college_id: collegeId,
+    matched: result.matchedCount ?? total,
+    modified: result.modifiedCount ?? 0,
+    total: docs.length,
+    data: docs,
+  });
+};
+
+app.put(
+  "/api/college-course/college/:college_id",
+  asyncHandler(saveCollegeCourseCmsByCollegeId)
+);
+
+app.patch(
+  "/api/college-course/college/:college_id",
+  asyncHandler(saveCollegeCourseCmsByCollegeId)
+);
+
+app.post(
+  "/api/college-course/college/:college_id",
+  asyncHandler(saveCollegeCourseCmsByCollegeId)
+);
+
 app.get("/api/college-course/:id", asyncHandler(async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -2813,15 +2891,50 @@ app.get("/api/college-course/:id", asyncHandler(async (req, res) => {
 }));
 
 // Read single
-app.get("/api/colleges/:id", async (req, res) => {
+app.get("/api/colleges/:id", asyncHandler(async (req, res) => {
   const college = await College.findOne({ id: Number(req.params.id) }).lean();
   if (!college) return res.status(404).json({ success: false });
 
   res.json({
     success: true,
-    data: stripObjectKeyDeep(college, "header_highlights"),
+    data: buildCollegeDetailPayload(college),
   });
-});
+}));
+
+const sendCollegeAdminDetail = async (req, res) => {
+  const collegeId = Number(req.params.id);
+
+  if (Number.isNaN(collegeId) || collegeId <= 0) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid college id",
+    });
+  }
+
+  const college = await College.findOne({ id: collegeId }).lean();
+  if (!college) {
+    return res.status(404).json({
+      success: false,
+      message: "College not found",
+    });
+  }
+
+  const collegeDetail = buildCollegeDetailPayload(college);
+  const mainCourseCards = await buildCollegeAdminMainCourseCards(
+    collegeId,
+    collegeDetail.name || college.name || ""
+  );
+
+  res.json({
+    success: true,
+    data: collegeDetail,
+    total_main_course_cards: mainCourseCards.length,
+    main_course_cards: mainCourseCards,
+  });
+};
+
+app.get("/api/college-admin/:id", asyncHandler(sendCollegeAdminDetail));
+app.get("/api/college-admin-api/:id", asyncHandler(sendCollegeAdminDetail));
 
 app.put(
   "/api/colleges/:id/hero-image",
@@ -2989,6 +3102,20 @@ let mainCourseDetailCache = {
   expiresAt: 0,
   value: new Map(),
   pending: new Map(),
+};
+
+const resetMainCourseCatalogCache = () => {
+  mainCourseCatalogCache = {
+    expiresAt: 0,
+    value: null,
+    promise: null,
+  };
+
+  mainCourseDetailCache = {
+    expiresAt: 0,
+    value: new Map(),
+    pending: new Map(),
+  };
 };
 
 const MAIN_COURSE_SUMMARY_PROJECTION = {
@@ -3608,6 +3735,449 @@ const findMainCourseDetail = async (slug) => {
   }
 };
 
+const buildCmsControlledFieldValue = (value, existingField = null) => {
+  if (value === undefined) return undefined;
+
+  if (
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.prototype.hasOwnProperty.call(value, "value")
+  ) {
+    return {
+      value: value.value ?? null,
+      cmsControl: value.cmsControl ?? existingField?.cmsControl ?? true,
+      source: value.source || "manual",
+      updatedAt: new Date(),
+    };
+  }
+
+  return {
+    value,
+    cmsControl: existingField?.cmsControl ?? true,
+    source: "manual",
+    updatedAt: new Date(),
+  };
+};
+
+const assignCmsControlledField = (target, key, value, existingField = null) => {
+  const nextValue = buildCmsControlledFieldValue(value, existingField);
+  if (nextValue !== undefined) {
+    target[key] = nextValue;
+  }
+};
+
+const extractOverviewParagraphs = (value) => {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => pickFirstText(item?.value, item))
+      .filter(Boolean);
+  }
+
+  const text = pickFirstText(value);
+  if (!text) return [];
+
+  return text
+    .split(/\r?\n\s*\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+};
+
+const extractMainCourseCmsDetails = (doc = {}) => {
+  const rawDetails =
+    doc?.details && typeof doc.details === "object" && !Array.isArray(doc.details)
+      ? doc.details
+      : {};
+  const overviewParagraphs = extractOverviewParagraphs(
+    toPlainValue(rawDetails.overview_paragraphs)
+  );
+  const overviewFullText =
+    pickFirstText(rawDetails.overview_full_text) ||
+    overviewParagraphs.join("\n\n");
+  const normalizedOverviewParagraphs =
+    overviewParagraphs.length
+      ? overviewParagraphs
+      : extractOverviewParagraphs(overviewFullText);
+
+  return {
+    heading: pickFirstText(rawDetails.heading),
+    overview_full_text: overviewFullText,
+    overview_paragraphs: normalizedOverviewParagraphs,
+    highlights: toPlainValue(rawDetails.highlights) ?? {},
+  };
+};
+
+const buildMainCourseUpdatePayload = (body = {}, existingDoc = {}) => {
+  const courseInput =
+    body?.course && typeof body.course === "object" && !Array.isArray(body.course)
+      ? body.course
+      : body;
+  const detailsInput =
+    courseInput?.details &&
+    typeof courseInput.details === "object" &&
+    !Array.isArray(courseInput.details)
+      ? courseInput.details
+      : body?.details &&
+          typeof body.details === "object" &&
+          !Array.isArray(body.details)
+        ? body.details
+        : {};
+  const providedCourseDetail =
+    body?.course_detail !== undefined
+      ? body.course_detail
+      : courseInput?.course_detail;
+  const providedSyllabusDetail =
+    body?.syllabus_detail !== undefined
+      ? body.syllabus_detail
+      : courseInput?.syllabus_detail;
+  const providedCourseData =
+    body?.course_data &&
+    typeof body.course_data === "object" &&
+    !Array.isArray(body.course_data)
+      ? body.course_data
+      : courseInput?.course_data &&
+          typeof courseInput.course_data === "object" &&
+          !Array.isArray(courseInput.course_data)
+        ? courseInput.course_data
+        : null;
+
+  const updatePayload = {};
+  const nextCourseName = courseInput.course_name ?? courseInput.name;
+  const nextCollegeId = courseInput.collegeId ?? courseInput.college_id;
+  const nextCollegeName = courseInput.collegeName ?? courseInput.college_name;
+  const nextFees = courseInput.fees ?? courseInput.avg_fees;
+  const nextLevel = courseInput.course_level ?? courseInput.level;
+
+  assignCmsControlledField(updatePayload, "name", nextCourseName, existingDoc?.name);
+  assignCmsControlledField(
+    updatePayload,
+    "collegeId",
+    nextCollegeId,
+    existingDoc?.collegeId
+  );
+  assignCmsControlledField(
+    updatePayload,
+    "collegeName",
+    nextCollegeName,
+    existingDoc?.collegeName
+  );
+  assignCmsControlledField(updatePayload, "rating", courseInput.rating, existingDoc?.rating);
+  assignCmsControlledField(updatePayload, "fees", nextFees, existingDoc?.fees);
+  assignCmsControlledField(
+    updatePayload,
+    "duration",
+    courseInput.duration,
+    existingDoc?.duration
+  );
+  assignCmsControlledField(
+    updatePayload,
+    "eligibility",
+    courseInput.eligibility,
+    existingDoc?.eligibility
+  );
+  assignCmsControlledField(updatePayload, "mode", courseInput.mode, existingDoc?.mode);
+  assignCmsControlledField(
+    updatePayload,
+    "reviews",
+    courseInput.reviews,
+    existingDoc?.reviews
+  );
+
+  const hasDetailUpdates =
+    nextCourseName !== undefined ||
+    detailsInput.heading !== undefined ||
+    detailsInput.overview_full_text !== undefined ||
+    detailsInput.overview_paragraphs !== undefined ||
+    detailsInput.highlights !== undefined;
+
+  if (hasDetailUpdates) {
+    const nextDetails =
+      existingDoc?.details &&
+      typeof existingDoc.details === "object" &&
+      !Array.isArray(existingDoc.details)
+        ? { ...existingDoc.details }
+        : {};
+
+    assignCmsControlledField(
+      nextDetails,
+      "heading",
+      detailsInput.heading ?? nextCourseName,
+      existingDoc?.details?.heading
+    );
+    assignCmsControlledField(
+      nextDetails,
+      "overview_full_text",
+      detailsInput.overview_full_text,
+      existingDoc?.details?.overview_full_text
+    );
+    assignCmsControlledField(
+      nextDetails,
+      "overview_paragraphs",
+      detailsInput.overview_paragraphs ??
+        (detailsInput.overview_full_text !== undefined
+          ? extractOverviewParagraphs(detailsInput.overview_full_text)
+          : undefined),
+      existingDoc?.details?.overview_paragraphs
+    );
+    assignCmsControlledField(
+      nextDetails,
+      "highlights",
+      detailsInput.highlights,
+      existingDoc?.details?.highlights
+    );
+
+    if (Object.keys(nextDetails).length) {
+      updatePayload.details = nextDetails;
+    }
+  }
+
+  const nextCourseData =
+    toPlainValue(existingDoc?.course) &&
+    typeof toPlainValue(existingDoc.course) === "object" &&
+    !Array.isArray(toPlainValue(existingDoc.course))
+      ? { ...toPlainValue(existingDoc.course) }
+      : {};
+  let shouldPersistCourseData = false;
+
+  if (providedCourseData) {
+    Object.assign(nextCourseData, providedCourseData);
+    shouldPersistCourseData = true;
+  }
+
+  if (nextCourseName !== undefined) {
+    nextCourseData.course_name = nextCourseName;
+    nextCourseData.name = nextCourseName;
+    shouldPersistCourseData = true;
+  }
+  if (courseInput.duration !== undefined) {
+    nextCourseData.duration = courseInput.duration;
+    shouldPersistCourseData = true;
+  }
+  if (courseInput.mode !== undefined) {
+    nextCourseData.mode = courseInput.mode;
+    shouldPersistCourseData = true;
+  }
+  if (nextFees !== undefined) {
+    nextCourseData.fees = nextFees;
+    shouldPersistCourseData = true;
+  }
+  if (courseInput.eligibility !== undefined) {
+    nextCourseData.eligibility = courseInput.eligibility;
+    shouldPersistCourseData = true;
+  }
+  if (nextLevel !== undefined) {
+    nextCourseData.level = nextLevel;
+    shouldPersistCourseData = true;
+  }
+  if (courseInput.slug !== undefined) {
+    nextCourseData.slug_url =
+      cleanCourseSlug(courseInput.slug) || String(courseInput.slug).trim();
+    shouldPersistCourseData = true;
+  }
+
+  if (shouldPersistCourseData) {
+    updatePayload.course = nextCourseData;
+  }
+
+  if (providedCourseDetail !== undefined) {
+    updatePayload.course_detail = providedCourseDetail;
+  }
+
+  if (providedSyllabusDetail !== undefined) {
+    updatePayload.syllabus_detail = providedSyllabusDetail;
+  }
+
+  if (courseInput.stream !== undefined) {
+    updatePayload.stream = courseInput.stream;
+  }
+  if (courseInput.source_url !== undefined) {
+    updatePayload.source_url = courseInput.source_url;
+  }
+  if (courseInput.final_url !== undefined) {
+    updatePayload.final_url = courseInput.final_url;
+  }
+  if (nextCourseName !== undefined) {
+    updatePayload.course_name = nextCourseName;
+  }
+  if (courseInput.title !== undefined) {
+    updatePayload.title = courseInput.title;
+  }
+  if (courseInput.full_name !== undefined) {
+    updatePayload.full_name = courseInput.full_name;
+  }
+  if (courseInput.slug !== undefined) {
+    updatePayload.slug =
+      cleanCourseSlug(courseInput.slug) || String(courseInput.slug).trim();
+  }
+
+  return updatePayload;
+};
+
+const buildMainCourseDetailResponse = async (detail) => {
+  const { allCollegesData, collegesOffering } =
+    await enrichOfferingsWithCollegeData(detail.matched_offerings);
+
+  const primaryRecord = detail.primaryRecord;
+  const cmsDetails = extractMainCourseCmsDetails(primaryRecord?.raw_doc || {});
+  const fallbackOverviewParagraphs = extractMainCourseAboutParagraphs(
+    primaryRecord?.course_detail
+  );
+  const overviewParagraphs =
+    cmsDetails.overview_paragraphs.length
+      ? cmsDetails.overview_paragraphs
+      : fallbackOverviewParagraphs;
+  const avgRating = averageNumbers(
+    allCollegesData.map((row) => parseNumericValue(row.rating))
+  );
+
+  return {
+    collection: MainCourse.collection.name,
+    college_course_collection: detail.college_course_collection,
+    course: {
+      slug: detail.slug,
+      name: detail.course_name,
+      course_name: detail.course_name,
+      course_level: detail.course_level,
+      level: detail.course_level,
+      mode: detail.mode,
+      duration: detail.duration,
+      fees: detail.avg_fees,
+      avg_fees: detail.avg_fees,
+      totalColleges: detail.total_college_count,
+      total_college_count: detail.total_college_count,
+      avgRating: avgRating !== null ? avgRating.toFixed(1) : null,
+      stream: detail.stream,
+      source_url: detail.source_url,
+      final_url: detail.final_url,
+      details: {
+        heading: cmsDetails.heading || detail.course_name,
+        overview_full_text:
+          cmsDetails.overview_full_text || overviewParagraphs.join("\n\n"),
+        overview_paragraphs: overviewParagraphs,
+        highlights: cmsDetails.highlights,
+        course_detail: primaryRecord?.course_detail || null,
+        syllabus_detail: primaryRecord?.syllabus_detail || null,
+      },
+      course_data: primaryRecord?.course || null,
+      course_detail: primaryRecord?.course_detail || null,
+      syllabus_detail: primaryRecord?.syllabus_detail || null,
+    },
+    allCollegesData,
+    collegesOffering,
+  };
+};
+
+const loadCollegeMainCourseRecords = async (collegeId) => {
+  if (!Number.isFinite(collegeId) || collegeId <= 0) {
+    return [];
+  }
+
+  const collegeIdVariants = Array.from(
+    new Set([collegeId, String(collegeId)])
+  );
+
+  const docs = await MainCourse.find(
+    {
+      $or: [
+        { "collegeId.value": { $in: collegeIdVariants } },
+        { "college_id.value": { $in: collegeIdVariants } },
+        { college_id: { $in: collegeIdVariants } },
+      ],
+    },
+    MAIN_COURSE_SUMMARY_PROJECTION
+  ).lean();
+
+  return docs.map((doc) => extractMainCourseRecord(doc));
+};
+
+const buildCollegeAdminCourseFeeRows = (
+  collegeId,
+  collegeName,
+  detail,
+  records = []
+) => {
+  const matchedOfferings = detail.matched_offerings.filter(
+    (offering) => Number(offering.college_id) === collegeId
+  );
+
+  const rows = (matchedOfferings.length ? matchedOfferings : records).map(
+    (item) => ({
+      name: item.course_name || detail.course_name || "",
+      collegeId,
+      collegeName: collegeName || "",
+      fees: item.avg_fees ?? "N/A",
+      avg_fees: item.avg_fees ?? null,
+      duration: item.duration || detail.duration || "N/A",
+      mode: item.mode || detail.mode || "N/A",
+      slug_url: item.slug_url || item.slug || detail.slug || "",
+      source_url: item.source_url || detail.source_url || "",
+    })
+  );
+
+  const uniqueRows = new Map();
+  rows.forEach((row) => {
+    const rowKey = [
+      row.name,
+      row.avg_fees ?? "na",
+      row.duration,
+      row.mode,
+      row.slug_url,
+    ].join("|");
+
+    if (!uniqueRows.has(rowKey)) {
+      uniqueRows.set(rowKey, row);
+    }
+  });
+
+  return Array.from(uniqueRows.values()).sort((a, b) =>
+    String(a.name || "").localeCompare(String(b.name || ""))
+  );
+};
+
+const buildCollegeAdminMainCourseCards = async (collegeId, collegeName = "") => {
+  const records = await loadCollegeMainCourseRecords(collegeId);
+  const groupedRecords = new Map();
+
+  records.forEach((record) => {
+    const slug = record.slug || cleanCourseSlug(record.course_name);
+    if (!slug) return;
+
+    if (!groupedRecords.has(slug)) {
+      groupedRecords.set(slug, []);
+    }
+
+    groupedRecords.get(slug).push(record);
+  });
+
+  const cards = await Promise.all(
+    Array.from(groupedRecords.entries()).map(async ([slug, courseRecords]) => {
+      const detail = await findMainCourseDetail(slug);
+      if (!detail) return null;
+
+      return {
+        slug: detail.slug,
+        course_name: detail.course_name,
+        college_course_fees: buildCollegeAdminCourseFeeRows(
+          collegeId,
+          collegeName,
+          detail,
+          courseRecords
+        ),
+        main_course_card: {
+          success: true,
+          ...(await buildMainCourseDetailResponse(detail)),
+        },
+      };
+    })
+  );
+
+  return cards
+    .filter(Boolean)
+    .sort((a, b) =>
+      String(a.course_name || "").localeCompare(String(b.course_name || ""))
+    );
+};
+
 const sendMainCourseCards = async (req, res, next) => {
   const bucket = String(req.query.bucket || "all").trim().toLowerCase();
  const page = 1;
@@ -3680,51 +4250,72 @@ const sendMainCourseDetail = async (req, res, next) => {
     });
   }
 
-  const { allCollegesData, collegesOffering } =
-    await enrichOfferingsWithCollegeData(detail.matched_offerings);
+  res.json({
+    success: true,
+    ...(await buildMainCourseDetailResponse(detail)),
+  });
+};
 
-  const primaryRecord = detail.primaryRecord;
-  const overviewParagraphs = extractMainCourseAboutParagraphs(
-    primaryRecord?.course_detail
+const updateMainCourseDetail = async (req, res) => {
+  const detail = await findMainCourseDetail(req.params.slug);
+
+  if (!detail?.primaryRecord?.id) {
+    return res.status(404).json({
+      success: false,
+      message: "Course not found",
+    });
+  }
+
+  const updatePayload = buildMainCourseUpdatePayload(
+    req.body,
+    detail.primaryRecord.raw_doc || {}
   );
-  const avgRating = averageNumbers(
-    allCollegesData.map((row) => parseNumericValue(row.rating))
+
+  if (!Object.keys(updatePayload).length) {
+    return res.status(400).json({
+      success: false,
+      message: "No valid fields provided for update",
+    });
+  }
+
+  const updated = await MainCourse.findByIdAndUpdate(
+    detail.primaryRecord.id,
+    { $set: updatePayload },
+    {
+      new: true,
+      runValidators: true,
+      strict: false,
+    }
   );
+
+  if (!updated) {
+    return res.status(404).json({
+      success: false,
+      message: "Course record not found",
+    });
+  }
+
+  resetMainCourseCatalogCache();
+
+  const requestedSlug =
+    cleanCourseSlug(req.body?.course?.slug || req.body?.slug || "") ||
+    req.params.slug;
+  const refreshedDetail =
+    (await findMainCourseDetail(requestedSlug)) ||
+    (await findMainCourseDetail(req.params.slug));
+
+  if (!refreshedDetail) {
+    return res.json({
+      success: true,
+      message: "Main course updated successfully",
+      record_id: String(updated._id),
+    });
+  }
 
   res.json({
     success: true,
-    collection: MainCourse.collection.name,
-    college_course_collection: detail.college_course_collection,
-    course: {
-      slug: detail.slug,
-      name: detail.course_name,
-      course_name: detail.course_name,
-      course_level: detail.course_level,
-      level: detail.course_level,
-      mode: detail.mode,
-      duration: detail.duration,
-      fees: detail.avg_fees,
-      avg_fees: detail.avg_fees,
-      totalColleges: detail.total_college_count,
-      total_college_count: detail.total_college_count,
-      avgRating: avgRating !== null ? avgRating.toFixed(1) : null,
-      stream: detail.stream,
-      source_url: detail.source_url,
-      final_url: detail.final_url,
-      details: {
-        heading: detail.course_name,
-        overview_full_text: overviewParagraphs.join("\n\n"),
-        overview_paragraphs: overviewParagraphs,
-        highlights: {},
-        course_detail: primaryRecord?.course_detail || null,
-        syllabus_detail: primaryRecord?.syllabus_detail || null,
-      },
-      course_data: primaryRecord?.course || null,
-      course_detail: primaryRecord?.course_detail || null,
-      syllabus_detail: primaryRecord?.syllabus_detail || null,
-    },
-    allCollegesData,
-    collegesOffering,
+    message: "Main course updated successfully",
+    ...(await buildMainCourseDetailResponse(refreshedDetail)),
   });
 };
 
@@ -3758,6 +4349,7 @@ const sendMainCourseColleges = async (req, res, next) => {
 app.get("/api/main-course-card", asyncHandler(sendMainCourseCards));
 app.get("/api/courses/cards", asyncHandler(sendMainCourseCards));
 app.get("/api/main-course-card/:slug", asyncHandler(sendMainCourseDetail));
+app.put("/api/main-course-card/:slug", asyncHandler(updateMainCourseDetail));
 app.get("/api/main-course/:slug", asyncHandler(sendMainCourseDetail));
 app.get("/api/course/:slug", asyncHandler(sendMainCourseDetail));
 app.get("/api/main-course-card/:slug/colleges", asyncHandler(sendMainCourseColleges));
@@ -4546,12 +5138,6 @@ app.get(
   })
 );
 
-
-app.use((err, req, res, next) => {
-  console.error("Unhandled Error:", err);
-  sendError(res, err.message || "Server Error", 500);
-});
-
 app.get("/api/scrape/result/:id", async (req, res) => {
   try {
     const tempCollection = tempConn.collection("college_course_test");
@@ -4996,6 +5582,17 @@ app.get("/api/courses/all", asyncHandler(async (req, res) => {
   });
 }));
 
+app.use("/api", (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: `API route not found: ${req.method} ${req.originalUrl}`,
+  });
+});
+
+app.use((err, req, res, next) => {
+  console.error("Unhandled Error:", err);
+  sendError(res, err.message || "Server Error", 500);
+});
 
 
 
