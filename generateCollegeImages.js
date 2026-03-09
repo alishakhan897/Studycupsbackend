@@ -5,7 +5,6 @@ import dotenv from "dotenv";
 import { v2 as cloudinary } from "cloudinary";
 import { ObjectId } from "mongodb";
 
-
 dotenv.config();
 
 /* ================= CLOUDINARY ================= */
@@ -69,42 +68,56 @@ async function getGoogleCampusImages(name) {
 /* ================= MAIN ================= */
 
 async function run() {
-  const tempId = process.argv[2];
-  console.log("🆔 tempId received:", tempId);
-if (!tempId) {
-  console.log("❌ tempId missing");
-  process.exit(1);
-}
+  const inputId = process.argv[2];
+  console.log("ID received:", inputId);
 
-const _id = new ObjectId(tempId);
-console.log("🆔 Converted ObjectId:", _id.toString());
+  if (!inputId) {
+    console.log("ID missing");
+    process.exit(1);
+  }
 
-
-  // ✅ CONNECT FIRST
   await mongoose.connect(process.env.MONGO_URI);
 
-  // ⬇️ ADD THIS (database force select)
-const db = mongoose.connection.client.db("studycups");
-console.log("✅ IMAGE SCRIPT DB:", db.databaseName);
+  const db = mongoose.connection.client.db("studentcap");
+  console.log("IMAGE SCRIPT DB:", db.databaseName);
 
-// ⬇️ collection force select
-const TempCollege = db.collection("college_course_test");
-console.log("✅ IMAGE SCRIPT COLLECTION:", TempCollege.collectionName);
+  const CollegeCollection = db.collection("new_college");
+  console.log("IMAGE SCRIPT COLLECTION:", CollegeCollection.collectionName);
 
-  const college = await TempCollege.findOne({ _id });
+  let college = null;
 
+  if (ObjectId.isValid(inputId)) {
+    college = await CollegeCollection.findOne({ _id: new ObjectId(inputId) });
+  }
+
+  if (!college && !Number.isNaN(Number(inputId))) {
+    college = await CollegeCollection.findOne({ id: Number(inputId) });
+  }
 
   if (!college) {
-    console.log("❌ Temp college not found:", tempId);
+    console.log("College not found in studentcap.new_college:", inputId);
     process.exit(0);
   }
 
-  if (college.heroDownloaded) {
-    console.log("⚠️ Hero already exists");
+  const existingHeroImages = Array.isArray(college.heroImages)
+    ? college.heroImages.filter(Boolean)
+    : [];
+
+  if (existingHeroImages.length > 0 || college.heroDownloaded) {
+    console.log("Hero already exists, skipping");
     process.exit(0);
   }
 
-  const name = cleanCollegeName(college.college_name || college.full_name);
+  const cmsName = college?.cms?.basic?.name?.value;
+  const name = cleanCollegeName(
+    cmsName || college.name || college.college_name || college.full_name
+  );
+
+  if (!name) {
+    console.log("College name missing, cannot search images");
+    process.exit(0);
+  }
+
   const links = await getGoogleCampusImages(name);
 
   let heroImages = [];
@@ -113,26 +126,31 @@ console.log("✅ IMAGE SCRIPT COLLECTION:", TempCollege.collectionName);
     try {
       const file = await downloadImg(link);
       const uploaded = await cloudinary.uploader.upload(file, {
-        folder: "studycups/temp/hero"
+        folder: "studycups/colleges/hero"
       });
       heroImages.push(uploaded.secure_url);
       fs.unlinkSync(file);
-    } catch {}
-  }
-
-  // ✅ UPDATE TEMP DB ONLY
-  await TempCollege.updateOne(
-  { _id },
-  {
-    $set: {
-      heroImages,
-      heroDownloaded: true
+    } catch {
+      // ignore one-off image failures
     }
   }
-);
 
+  if (!heroImages.length) {
+    console.log("No hero image generated");
+    process.exit(0);
+  }
 
-  console.log("✅ Hero generated for tempId:", tempId);
+  await CollegeCollection.updateOne(
+    { _id: college._id },
+    {
+      $set: {
+        heroImages,
+        heroDownloaded: true
+      }
+    }
+  );
+
+  console.log("Hero generated for college:", college._id.toString());
   process.exit(0);
 }
 

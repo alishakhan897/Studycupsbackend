@@ -29,6 +29,15 @@ const tempConn = mongoose.createConnection(
   { dbName: "studycups" }
 );
 
+mainConn.once("open", () => {
+  getMainCourseCatalog().catch((error) => {
+    console.error("Main course catalog warmup failed:", error?.message || error);
+  });
+  getCollegeCardCatalog().catch((error) => {
+    console.error("College card catalog warmup failed:", error?.message || error);
+  });
+});
+
 cloudinary.config({
   cloud_name: process.env.CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -79,29 +88,95 @@ function normalizeGallery(gallery) {
   }).filter(Boolean);
 }
 
-function normalizeCourse(course) {
+const normalizeCourse = (name = "") => {
+  if (!name) return "";
+  return name.toLowerCase()
+  
+    .replace(/master of technology|m\.?tech|mtech/gi, "mtech")
+    .replace(/bachelor of technology|b\.?tech|btech/gi, "btech")
+    .replace(/[^a-z0-9]/g, "") // Remove symbols
+    .trim();
+};
+
+const normalizeCourseName = (name = "") =>
+  name
+    .toLowerCase()
+    .replace(/\(.*?\)/g, "")     // remove specialization brackets
+    .replace(/\./g, "")          // remove dots
+    .replace(/\s+/g, " ")        // normalize spaces
+    .trim();
+
+const normalize = (str = "") =>
+  str
+    .toLowerCase()
+    .replace(/\./g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+const splitCourseName = (name = "") => {
+  const clean = normalize(name);
+
+  // bracket specialization first priority
+  const bracketMatch = name.match(/\(([^)]+)\)/);
+
+  if (bracketMatch) {
+    return {
+      degree: normalize(name.split("(")[0]),
+      specialization: normalize(bracketMatch[1])
+    };
+  }
+
+  // otherwise split by words
+  const parts = clean.split(" ");
+
   return {
-    ...course,
-    fees: parseFees(course.fees)
+    degree: parts[0], // data-driven, not hard-coded
+    specialization: parts.slice(1).join(" ") || "general"
   };
-}
+};
+
+
 
 function parseFees(value) {
   if (!value) return null;
   if (typeof value === 'number') return value;
-  const clean = value.toString().replace(/,|Rs.?|INR/gi, '').toLowerCase().trim();
-  if (clean.includes('-')) {
-    const min = clean.split('-')[0];
-    return parseFloat(min) || null;
+  const clean = value
+    .toString()
+    .replace(/,|₹|Rs.?|INR/gi, '')
+    .toLowerCase()
+    .trim();
+
+  const parseSingleAmount = (input) => {
+    const text = String(input || "").trim();
+    if (!text) return null;
+
+    const num = parseFloat(text);
+    if (isNaN(num)) return null;
+
+    if (/crore|crores|cr\b/.test(text)) return num * 10000000;
+    if (/lakh|lakhs|lac|lacs/.test(text)) return num * 100000;
+    if (/thousand|k\b/.test(text)) return num * 1000;
+    return num;
+  };
+
+  const rangeParts = clean.split(/\s*(?:-|–|—|to)\s*/i).filter(Boolean);
+  if (rangeParts.length > 1) {
+    return parseSingleAmount(rangeParts[0]);
   }
-  if (clean.includes('lakh')) {
-    const num = parseFloat(clean);
-    return isNaN(num) ? null : num * 100000;
-  }
-  const num = parseFloat(clean);
-  return isNaN(num) ? null : num;
+
+  return parseSingleAmount(clean);
 }
 
+const computeAverageFees = (feesRange) => {
+
+  const min = feesRange?.min;
+  const max = feesRange?.max;
+
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return null;
+  }
+
+  return Math.round((min + max) / 2);
+};
 // ================= BLOG IMAGE UPLOAD (TOP) =================
 
 
@@ -469,57 +544,249 @@ const ReviewSchema = new mongoose.Schema({
   source: String
 });
 
-const CollegeSchema = new mongoose.Schema({
-  id: { type: Number, index: true, unique: true },
+const CMSControlledFieldSchema = new mongoose.Schema(
+  {
+    value: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    cmsControl: {
+      type: Boolean,
+      default: true,
+    },
+    source: {
+      type: String,
+      enum: ["cms", "scraped", "manual"],
+      default: "cms",
+    },
+    updatedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: false }
+);
 
-  name: String,
-  location: String,
-  established: Number,
-  type: String,
-  stream: String,
-  rating: Number,
-  reviewCount: Number,
-  description: {
-  type: mongoose.Schema.Types.Mixed,
-  default: ""
+const CMSContentItemSchema = new mongoose.Schema(
+  {
+    type: CMSControlledFieldSchema,
+    value: CMSControlledFieldSchema,
+  },
+  { _id: false }
+);
+
+const CMSTocSectionSchema = new mongoose.Schema(
+  {
+    section: CMSControlledFieldSchema,
+    content: {
+      type: [CMSContentItemSchema],
+      default: [],
+    },
+  },
+  { _id: false }
+);
+
+const CMSBasicInfoSchema = new mongoose.Schema(
+  {
+    name: CMSControlledFieldSchema,
+    logo: CMSControlledFieldSchema,
+    city: CMSControlledFieldSchema,
+    state: CMSControlledFieldSchema,
+    college_type: CMSControlledFieldSchema,
+    established_year: CMSControlledFieldSchema,
+  },
+  { _id: false }
+);
+
+const CMSAboutSchema = new mongoose.Schema(
+  {
+    about_highlights: CMSControlledFieldSchema,
+    toc_sections: {
+      type: [CMSTocSectionSchema],
+      default: [],
+    },
+  },
+  { _id: false }
+);
+
+const CMSAdmissionAboutSchema = new mongoose.Schema(
+  {
+    format: CMSControlledFieldSchema,
+    value: CMSControlledFieldSchema,
+  },
+  { _id: false }
+);
+
+const CMSAdmissionSchema = new mongoose.Schema(
+  {
+    about: CMSAdmissionAboutSchema,
+    toc_sections: {
+      type: [CMSTocSectionSchema],
+      default: [],
+    },
+  },
+  { _id: false }
+);
+
+const CMSGalleryItemSchema = new mongoose.Schema(
+  {
+    src: CMSControlledFieldSchema,
+    alt: CMSControlledFieldSchema,
+  },
+  { _id: false }
+);
+
+const CollegeSchema = new mongoose.Schema({
+  source: String,
+  source_college_id: Number,
+  url: String, 
+  avg_fees: {
+  type: Number,
+  default: null
 },
 
-  highlights: [String],
-
-  gallery: {
-    type: [mongoose.Schema.Types.Mixed],
-    default: []
+  basic: {
+    name: String,
+    logo: String,
+    city: String,
+    state: String,
+    college_type: String,
+    established_year: String,
+    rating: Number,
+    reviews: Number,
+    about: mongoose.Schema.Types.Mixed,
+    about_highlights: mongoose.Schema.Types.Mixed,
+    toc_sections: mongoose.Schema.Types.Mixed,
   },
 
-  courses: [CourseSchema],
+  admission: mongoose.Schema.Types.Mixed,
+  reviews_page: mongoose.Schema.Types.Mixed,
+  ranking: mongoose.Schema.Types.Mixed,
+  placement: mongoose.Schema.Types.Mixed,
+  faculty: mongoose.Schema.Types.Mixed,
+  cutoff: mongoose.Schema.Types.Mixed,
+  scholarship: mongoose.Schema.Types.Mixed,
 
-  heroImages: [String],
-  heroDownloaded: { type: Boolean, default: false },
+  gallery: mongoose.Schema.Types.Mixed,
+  qna: mongoose.Schema.Types.Mixed,
 
-  rawScraped: {
-    type: Object,
-    default: {},
-  },
-
-  // ✅ ONLY CMS CONTENT
-  content: {
-    about: SectionSchema,
-    admission: SectionSchema,
-    placement: SectionSchema,
-    courses_fees: SectionSchema,
-    ranking: SectionSchema,
-    campus: SectionSchema,
-    scholarship: SectionSchema,
-    faq: SectionSchema,
-    reviews: SectionSchema,
-    news: SectionSchema,
-  },
-}, { timestamps: true });
-
+}, {
+  strict: false,   // 🔥 VERY IMPORTANT
+  timestamps: true
+});
 
 CollegeSchema.index({ name: "text", location: 1 });
+CollegeSchema.index({ createdAt: -1 });
+CollegeSchema.index({ rating: -1, createdAt: -1 });
 
-const College = mainConn.model("college", CollegeSchema);
+const College = mainConn.model("college", CollegeSchema, "new_college");
+
+const MainCourseDetailsSchema = new mongoose.Schema(
+  {
+    heading: CMSControlledFieldSchema,
+    overview_full_text: CMSControlledFieldSchema,
+    overview_paragraphs: CMSControlledFieldSchema,
+    highlights: CMSControlledFieldSchema,
+  },
+  { _id: false }
+);
+
+const MainCourseSchema = new mongoose.Schema(
+  {
+    id: CMSControlledFieldSchema,
+    name: CMSControlledFieldSchema,
+    collegeId: CMSControlledFieldSchema,
+    collegeName: CMSControlledFieldSchema,
+    rating: CMSControlledFieldSchema,
+    fees: CMSControlledFieldSchema,
+    duration: CMSControlledFieldSchema,
+    eligibility: CMSControlledFieldSchema,
+    mode: CMSControlledFieldSchema,
+    reviews: CMSControlledFieldSchema,
+    details: MainCourseDetailsSchema,
+    collegeRawAdmission: CMSControlledFieldSchema,
+    rawData: CMSControlledFieldSchema,
+  },
+  { timestamps: true }
+);
+
+const BasicCollegeCourseItemSchema = new mongoose.Schema(
+  {
+    name: CMSControlledFieldSchema,
+    duration: CMSControlledFieldSchema,
+    level: CMSControlledFieldSchema,
+    fees: CMSControlledFieldSchema,
+    eligibility: CMSControlledFieldSchema,
+    about: CMSControlledFieldSchema,
+    mode: CMSControlledFieldSchema,
+    intake: CMSControlledFieldSchema,
+    admissionProcess: CMSControlledFieldSchema,
+    highlights: CMSControlledFieldSchema,
+    skills: CMSControlledFieldSchema,
+    structure: CMSControlledFieldSchema,
+    statistics: CMSControlledFieldSchema,
+    rawData: CMSControlledFieldSchema,
+  },
+  { _id: false }
+);
+
+const CollegeCourseSchema = new mongoose.Schema(
+  {
+    sourceUrl: CMSControlledFieldSchema,
+    status: CMSControlledFieldSchema,
+    progress: CMSControlledFieldSchema,
+    full_name: CMSControlledFieldSchema,
+    college_name: CMSControlledFieldSchema,
+    location: CMSControlledFieldSchema,
+    estd_year: CMSControlledFieldSchema,
+    college_type: CMSControlledFieldSchema,
+    rating: CMSControlledFieldSchema,
+    review_count: CMSControlledFieldSchema,
+    about_text: CMSControlledFieldSchema,
+    about_list: CMSControlledFieldSchema,
+    gallery: CMSControlledFieldSchema,
+    heroImages: CMSControlledFieldSchema,
+    hero_generated: CMSControlledFieldSchema,
+    courses: [BasicCollegeCourseItemSchema],
+    rawData: CMSControlledFieldSchema,
+  },
+  { timestamps: true }
+);
+
+const MainCourse = mainConn.model("maincourse", MainCourseSchema, "maincourse");
+const CollegeCourse = mainConn.model(
+  "college_course",
+  CollegeCourseSchema,
+  "college_course"
+);
+
+// Raw CMS schema (no transformation) for collegedunia course pages
+const CollegeCourseCMSRawSchema = new mongoose.Schema(
+  {
+    source: String,
+    url: String,
+    college_id: Number,
+    courses: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: [],
+    },
+  },
+  {
+    strict: false,
+    timestamps: true,
+  }
+);
+
+const CollegeCourseCMS = mainConn.model(
+  "college_course_cms_raw",
+  CollegeCourseCMSRawSchema,
+  "college_course"
+);
+const CollegeCourseCMSSpace = mainConn.model(
+  "college_course_cms_raw_space",
+  CollegeCourseCMSRawSchema,
+  "college course"
+);
 
 
 const ExamSchema = new mongoose.Schema(
@@ -942,6 +1209,1077 @@ async function handlePlannedQuery(plan, res) {
       "I can help you with colleges, courses, exams, fees and admissions."
   });
 }
+const getBestRanking = (rankingData = []) => {
+  if (!Array.isArray(rankingData)) return null;
+
+  // Priority: India / NIRF / Collegedunia
+  const preferred = rankingData.find(r =>
+    /india|nirf|collegedunia/i.test(r.ranking)
+  );
+
+  return preferred?.ranking || rankingData[0]?.ranking || null;
+};
+
+const getCourseTier = (totalColleges) => {
+  if (totalColleges >= 5) return "primary";    // show on /courses
+  if (totalColleges >= 2) return "secondary";  // show on /courses/all
+  return "longtail";                           // search only
+};
+
+const unwrapCmsValue = (field) => {
+  if (
+    field &&
+    typeof field === "object" &&
+    !Array.isArray(field) &&
+    Object.prototype.hasOwnProperty.call(field, "value")
+  ) {
+    return field.value;
+  }
+  return field;
+};
+
+const pickFirstNonEmpty = (...values) => {
+  for (const value of values) {
+    if (value === null || value === undefined) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return null;
+};
+
+const stripObjectKeyDeep = (node, blockedKey) => {
+  if (Array.isArray(node)) {
+    return node.map((item) => stripObjectKeyDeep(item, blockedKey));
+  }
+
+  if (!node || typeof node !== "object") {
+    return node;
+  }
+
+  if (
+    typeof node.toHexString === "function" ||
+    node?._bsontype === "ObjectId"
+  ) {
+    return String(node.toHexString());
+  }
+
+  return Object.entries(node).reduce((acc, [key, value]) => {
+    if (key === blockedKey) {
+      return acc;
+    }
+
+    acc[key] = stripObjectKeyDeep(value, blockedKey);
+    return acc;
+  }, {});
+};
+
+const normalizeExistingFeesRange = (feesRange) => {
+  if (!feesRange || typeof feesRange !== "object") return null;
+  const min = Number(feesRange.min);
+  const max = Number(feesRange.max);
+  if (Number.isFinite(min) && Number.isFinite(max) && min > 0 && max >= min) {
+    return { min, max };
+  }
+  return null;
+};
+
+const normalizeMainStreamLabel = (value) => {
+  if (!value) return null;
+  const raw = String(value).trim();
+  const key = raw.toLowerCase();
+
+  const map = {
+    management: "MBA / PGDM",
+    mba: "MBA / PGDM",
+    engineering: "B.E / B.Tech",
+    medical: "MBBS",
+    it: "BCA",
+    commerce: "B.Com",
+    science: "B.Sc",
+    arts: "BA",
+    education: "B.Ed",
+    law: "BA LLB",
+    btech: "B.E / B.Tech",
+    mtech: "M.E / M.Tech",
+    bca: "BCA",
+    mca: "MCA",
+    bba: "BBA",
+    general: "General",
+  };
+
+  return map[key] || raw;
+};
+
+const inferStreamFromCollege = (college) => {
+  if (college?.stream) return normalizeMainStreamLabel(college.stream);
+
+  const corpus = [
+    college?.name,
+    college?.type,
+    college?.basic?.name,
+    college?.basic?.college_type,
+    unwrapCmsValue(college?.cms?.basic?.name),
+    unwrapCmsValue(college?.cms?.basic?.college_type),
+    unwrapCmsValue(college?.cms?.about?.about_highlights),
+    college?.about?.about_highlights,
+    college?.admission?.about?.value,
+    unwrapCmsValue(college?.cms?.admission?.about?.value),
+  ]
+    .filter(Boolean)
+    .map(v => (typeof v === "string" ? v : JSON.stringify(v)))
+    .join(" ")
+    .toLowerCase();
+
+  const scored = TOP_COURSES.map(course => {
+    const score = course.keywords.reduce((acc, keyword) => {
+      const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`\\b${escaped}\\b`, "i");
+      return acc + (re.test(corpus) ? 1 : 0);
+    }, 0);
+    return { name: course.name, score };
+  }).sort((a, b) => b.score - a.score);
+
+  if (scored[0]?.score > 0) {
+    return scored[0].name;
+  }
+
+  if (/\biim\b/.test(corpus)) return "MBA / PGDM";
+  return "General";
+};
+
+const toPlainValue = (value) => {
+  let current = value;
+
+  while (
+    current &&
+    typeof current === "object" &&
+    !Array.isArray(current) &&
+    Object.prototype.hasOwnProperty.call(current, "value")
+  ) {
+    current = current.value;
+  }
+
+  return current;
+};
+
+const pickFirstText = (...values) => {
+  for (const value of values) {
+    const plainValue = toPlainValue(value);
+
+    if (plainValue === null || plainValue === undefined) continue;
+
+    if (typeof plainValue === "number" && Number.isFinite(plainValue)) {
+      return String(plainValue);
+    }
+
+    if (typeof plainValue !== "string") continue;
+
+    const text = plainValue.trim();
+    if (text) return text;
+  }
+
+  return "";
+};
+
+const toArrayValue = (value) => {
+  const plainValue = toPlainValue(value);
+  return Array.isArray(plainValue) ? plainValue : [];
+};
+
+const GENERIC_COURSE_SLUGS = new Set([
+  "course",
+  "courses",
+  "syllabus",
+  "subjects",
+  "fees",
+  "admission",
+  "admissions",
+  "eligibility",
+  "scope",
+  "jobs",
+  "salary",
+  "placements",
+  "placement",
+  "cutoff",
+  "cutoffs",
+  "ranking",
+  "rankings",
+  "review",
+  "reviews",
+  "faq",
+  "faqs",
+  "dates",
+  "important-dates",
+  "important-date",
+  "results",
+  "comparison",
+  "apply",
+]);
+
+const slugifyCourseText = (value = "") =>
+  String(value)
+    .toLowerCase()
+    .replace(/[\[\](){}]/g, " ")
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+const cleanCourseSlug = (value = "") => {
+  let slug = slugifyCourseText(value);
+
+  const cleanupPatterns = [
+    /-course-details?$/,
+    /-details?$/,
+    /-syllabus(?:-.+)?$/,
+    /-subjects?(?:-.+)?$/,
+    /-fees?(?:-.+)?$/,
+    /-admission(?:-.+)?$/,
+    /-eligibility(?:-.+)?$/,
+    /-scope(?:-.+)?$/,
+    /-jobs?(?:-.+)?$/,
+    /-salary(?:-.+)?$/,
+    /-placements?(?:-.+)?$/,
+    /-cutoff(?:-.+)?$/,
+  ];
+
+  cleanupPatterns.forEach((pattern) => {
+    slug = slug.replace(pattern, "");
+  });
+
+  slug = slug.replace(/-\d{2,}$/, "");
+
+  return slug.replace(/^-+|-+$/g, "");
+};
+
+const extractSlugFromUrl = (value = "") => {
+  if (!value) return "";
+
+  const raw = String(value).trim();
+  if (!raw) return "";
+
+  try {
+    const url =
+      raw.startsWith("http://") || raw.startsWith("https://")
+        ? new URL(raw)
+        : new URL(raw, "https://studycups.local");
+    const segments = url.pathname
+      .replace(/\/+$/g, "")
+      .split("/")
+      .filter(Boolean)
+      .map((segment) => cleanCourseSlug(segment))
+      .filter(Boolean);
+
+    const coursesIndex = segments.lastIndexOf("courses");
+    if (coursesIndex !== -1 && segments[coursesIndex + 1]) {
+      return segments[coursesIndex + 1];
+    }
+
+    const lastSegment = segments[segments.length - 1] || "";
+    if (
+      GENERIC_COURSE_SLUGS.has(lastSegment) &&
+      segments.length > 1
+    ) {
+      return segments[segments.length - 2];
+    }
+
+    return lastSegment;
+  } catch {
+    const segments = raw
+      .replace(/\/+$/g, "")
+      .split("/")
+      .filter(Boolean)
+      .map((segment) => cleanCourseSlug(segment))
+      .filter(Boolean);
+
+    const lastSegment = segments[segments.length - 1] || cleanCourseSlug(raw);
+    if (
+      GENERIC_COURSE_SLUGS.has(lastSegment) &&
+      segments.length > 1
+    ) {
+      return segments[segments.length - 2];
+    }
+
+    return lastSegment;
+  }
+};
+
+const toCourseMatchKey = (value = "") => {
+  const cleanedSlug = cleanCourseSlug(value);
+  if (!cleanedSlug || GENERIC_COURSE_SLUGS.has(cleanedSlug)) return "";
+  return cleanedSlug.replace(/-/g, "");
+};
+
+const addCourseMatchKey = (target, value) => {
+  const plainValue = toPlainValue(value);
+
+  if (plainValue === null || plainValue === undefined) return;
+
+  if (typeof plainValue === "number" && Number.isFinite(plainValue)) {
+    const numericKey = toCourseMatchKey(String(plainValue));
+    if (numericKey) target.add(numericKey);
+    return;
+  }
+
+  if (typeof plainValue !== "string") return;
+
+  const text = plainValue.trim();
+  if (!text) return;
+
+  const isUrlLike = /^(https?:\/\/|\/)/i.test(text);
+  const urlSlug = extractSlugFromUrl(text);
+  const urlKey = toCourseMatchKey(urlSlug);
+  const textKey = isUrlLike ? "" : toCourseMatchKey(text);
+
+  if (urlKey) target.add(urlKey);
+  if (textKey) target.add(textKey);
+};
+
+const getPreferredCourseSlug = (...values) => {
+  for (const value of values) {
+    const plainValue = toPlainValue(value);
+    if (plainValue === null || plainValue === undefined) continue;
+    if (typeof plainValue !== "string") continue;
+
+    const text = plainValue.trim();
+    if (!text) continue;
+
+    const isUrlLike = /^(https?:\/\/|\/)/i.test(text);
+    const slug = isUrlLike ? extractSlugFromUrl(text) : cleanCourseSlug(text);
+    if (slug) return slug;
+  }
+
+  return "";
+};
+
+const getNumericId = (...values) => {
+  for (const value of values) {
+    const plainValue = toPlainValue(value);
+    const num = Number(plainValue);
+    if (Number.isFinite(num) && num > 0) return num;
+  }
+
+  return null;
+};
+
+const parseCourseFeeAmount = (value) => {
+  const plainValue = toPlainValue(value);
+
+  if (plainValue === null || plainValue === undefined) return null;
+
+  if (typeof plainValue === "number" && Number.isFinite(plainValue)) {
+    return plainValue >= 1000 ? plainValue : null;
+  }
+
+  if (typeof plainValue !== "string") return null;
+
+  const text = plainValue.trim();
+  if (!text) return null;
+
+  const lower = text.toLowerCase();
+  const looksLikeFee =
+    /₹|inr|rs\.?|rupees?/.test(text) ||
+    /lakh|lakhs|crore|crores|cr\b|k\b|thousand/.test(lower) ||
+    /\d[\d,]{3,}/.test(text);
+
+  if (!looksLikeFee) return null;
+
+  const parsed = parseFees(text);
+  if (parsed !== null && parsed >= 1000) return parsed;
+
+  const extractedAmount = extractAmountsFromText(text)[0];
+  return Number.isFinite(extractedAmount) ? extractedAmount : null;
+};
+
+const extractCourseFees = (...nodes) => {
+  const feeKeys = [
+    "avg_fees",
+    "average_fees",
+    "avgFees",
+    "fees",
+    "course_fees",
+    "courseFees",
+    "fee",
+    "total_fees",
+    "totalFees",
+  ];
+
+  for (const node of nodes) {
+    if (!node || typeof node !== "object") continue;
+
+    for (const feeKey of feeKeys) {
+      const parsed = parseCourseFeeAmount(node[feeKey]);
+      if (parsed !== null) return parsed;
+    }
+  }
+
+  return null;
+};
+
+const extractCourseSummaryFromFirstTocTable = (courseDetail = {}) => {
+  const firstSection = toArrayValue(courseDetail?.toc_sections)[0];
+  if (!firstSection) {
+    return {
+      avg_fees: null,
+      course_level: "",
+    };
+  }
+
+  const firstTable = toArrayValue(firstSection?.content).find((item) => {
+    const type = pickFirstText(item?.type).toLowerCase();
+    return type === "table" && Array.isArray(toPlainValue(item?.value));
+  });
+
+  if (!firstTable) {
+    return {
+      avg_fees: null,
+      course_level: "",
+    };
+  }
+
+  const rows = toArrayValue(firstTable?.value);
+  const summary = {
+    avg_fees: null,
+    course_level: "",
+  };
+
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length < 2) continue;
+
+    const label = pickFirstText(row[0]).toLowerCase();
+    const valueText = row
+      .slice(1)
+      .map((cell) => pickFirstText(cell))
+      .filter(Boolean)
+      .join(" ");
+
+    if (!label || !valueText) continue;
+
+    if (!summary.course_level && /(course level|course type|\blevel\b)/i.test(label)) {
+      summary.course_level = valueText;
+    }
+
+    if (summary.avg_fees === null && /(fee|fees|salary|package|ctc)/i.test(label)) {
+      const parsed = parseCourseFeeAmount(valueText);
+      if (parsed !== null) {
+        summary.avg_fees = parsed;
+      }
+    }
+
+    if (summary.avg_fees !== null && summary.course_level) {
+      break;
+    }
+  }
+
+  return summary;
+};
+
+const averageNumbers = (values = []) => {
+  const numericValues = values.filter((value) => Number.isFinite(value));
+  if (!numericValues.length) return null;
+
+  return Math.round(
+    numericValues.reduce((sum, value) => sum + value, 0) / numericValues.length
+  );
+};
+
+const extractAmountsFromText = (text) => {
+  if (!text || typeof text !== "string") return [];
+  const out = [];
+  const regex = /(\d+(?:\.\d+)?)\s*(crore|cr|lakh|lakhs|lac|lacs|thousand|k)?/gi;
+
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const raw = Number(match[1]);
+    if (!Number.isFinite(raw)) continue;
+
+    const unit = (match[2] || "").toLowerCase();
+    let amount = raw;
+
+    if (unit === "crore" || unit === "cr") amount = raw * 10000000;
+    else if (unit === "lakh" || unit === "lakhs" || unit === "lac" || unit === "lacs") amount = raw * 100000;
+    else if (unit === "thousand" || unit === "k") amount = raw * 1000;
+    else if (raw < 1000 || (raw >= 1900 && raw <= 2100)) continue;
+
+    out.push(Math.round(amount));
+  }
+
+  return out;
+};
+
+const extractFeesRangeFromCollege = (college) => {
+  const existing = normalizeExistingFeesRange(college?.feesRange || college?.rawScraped?.feesRange);
+  if (existing) return existing;
+
+  const feeValues = [];
+
+  const walk = (node) => {
+    if (!node) return;
+
+    const valueNode = unwrapCmsValue(node);
+
+    if (typeof valueNode === "string") {
+      const lower = valueNode.toLowerCase();
+      if (/fee|fees|tuition/.test(lower) && !/ctc|salary|stipend|package|lpa/.test(lower)) {
+        feeValues.push(...extractAmountsFromText(valueNode));
+      }
+      return;
+    }
+
+    if (Array.isArray(valueNode)) {
+      const looksLikeTable = valueNode.length > 0 && valueNode.every(row => Array.isArray(row));
+      if (looksLikeTable) {
+        const header = valueNode[0].map(cell => String(cell || "")).join(" ").toLowerCase();
+        if (/fee|fees|tuition/.test(header)) {
+          valueNode.forEach(row => {
+            row.forEach(cell => feeValues.push(...extractAmountsFromText(String(cell || ""))));
+          });
+        }
+      }
+      valueNode.forEach(walk);
+      return;
+    }
+
+    if (typeof valueNode === "object") {
+      Object.values(valueNode).forEach(walk);
+    }
+  };
+
+  walk(college?.basic?.about_highlights);
+  walk(college?.about?.about_highlights);
+  walk(college?.basic?.toc_sections);
+  walk(college?.about?.toc_sections);
+  walk(college?.admission?.toc_sections);
+  walk(college?.cms?.about);
+  walk(college?.cms?.admission);
+  walk(college?.rawScraped);
+
+  const cleaned = feeValues.filter(v => Number.isFinite(v) && v >= 10000);
+  if (!cleaned.length) return null;
+
+  return {
+    min: Math.min(...cleaned),
+    max: Math.max(...cleaned),
+  };
+};
+
+const extractRankingFromCollege = (college) => {
+  const rawRanking = getBestRanking(college?.rawScraped?.ranking_data);
+  if (rawRanking) return rawRanking;
+
+  const candidates = [];
+  const nodes = [
+    college?.ranking,
+    college?.basic?.about,
+    college?.basic?.about_highlights,
+    college?.basic?.toc_sections,
+    college?.about,
+    college?.cms?.ranking,
+    college?.cms?.about,
+    college?.rawScraped?.ranking,
+  ];
+
+  const agencyScore = (txt = "") => {
+    const t = txt.toLowerCase();
+    if (t.includes("nirf")) return 5000;
+    if (t.includes("collegedunia")) return 4000;
+    if (t.includes("outlook")) return 3000;
+    if (t.includes("iirf")) return 2500;
+    if (t.includes("qs")) return 2000;
+    return 1000;
+  };
+
+  const pushCandidate = (agency, year, rank) => {
+    if (!rank) return;
+    const y = Number(year) || 0;
+    const label = [agency, y || null, rank].filter(Boolean).join(" ").trim();
+    candidates.push({ label, score: agencyScore(agency) + y });
+  };
+
+  const walk = (node) => {
+    if (!node) return;
+    const valueNode = unwrapCmsValue(node);
+
+    if (typeof valueNode === "string") {
+      const m = valueNode.match(/(nirf|collegedunia|outlook|iirf|qs)[^.\n]{0,100}?(\d{4})?[^.\n]{0,40}?(\d{1,3}(?:st|nd|rd|th)?)/i);
+      if (m) pushCandidate(m[1].toUpperCase(), m[2], m[3]);
+      return;
+    }
+
+    if (Array.isArray(valueNode)) {
+      const isTable = valueNode.length > 0 && valueNode.every(r => Array.isArray(r));
+      if (isTable) {
+        const header = valueNode[0].map(x => String(x || "")).join(" ").toLowerCase();
+        if (header.includes("rank")) {
+          valueNode.slice(1).forEach(row => {
+            const rowText = row.map(x => String(x || "")).join(" ");
+            const agency = row[0] ? String(row[0]) : "Ranking";
+            const yearMatch = rowText.match(/\b(20\d{2})\b/);
+            const rankMatch = rowText.match(/\b(\d{1,3}(?:st|nd|rd|th)?)\b/i);
+            if (rankMatch) {
+              pushCandidate(agency, yearMatch?.[1], rankMatch[1]);
+            }
+          });
+        }
+      }
+      valueNode.forEach(walk);
+      return;
+    }
+
+    if (typeof valueNode === "object") {
+      Object.values(valueNode).forEach(walk);
+    }
+  };
+
+  nodes.forEach(walk);
+
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0].label || null;
+};
+
+const parseNumericValue = (value) => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const cleaned = String(value).replace(/[^0-9.]/g, "");
+  const num = Number(cleaned);
+  return Number.isFinite(num) ? num : null;
+};
+
+const extractRatingAndReviews = (college) => {
+  const reviewsPage =
+    college?.reviews_page ||
+    college?.rawScraped?.reviews_page ||
+    unwrapCmsValue(college?.cms?.reviews_page) ||
+    null;
+
+  const rating = (
+    parseNumericValue(college?.rating) ??
+    parseNumericValue(reviewsPage?.overall_rating?.score) ??
+    parseNumericValue(college?.rawScraped?.rating)
+  );
+
+  const reviewCount = (
+    parseNumericValue(college?.reviewCount) ??
+    parseNumericValue(reviewsPage?.overall_rating?.total_reviews) ??
+    parseNumericValue(college?.rawScraped?.review_count)
+  );
+
+  return {
+    rating: rating ?? null,
+    reviewCount: reviewCount ?? 0,
+  };
+};
+
+const extractCollegePackageHighlights = (college) => {
+  const packageHighlights =
+    college?.placement?.package_highlights ||
+    college?.placement?.packageHighlights ||
+    college?.rawScraped?.placement?.package_highlights ||
+    null;
+
+  const highestPackage = pickFirstNonEmpty(
+    packageHighlights?.highest_package,
+    packageHighlights?.highestPackage
+  );
+  const averagePackage = pickFirstNonEmpty(
+    packageHighlights?.average_package,
+    packageHighlights?.averagePackage
+  );
+
+  if (!highestPackage && !averagePackage) {
+    return null;
+  }
+
+  return {
+    highest_package: highestPackage || null,
+    average_package: averagePackage || null,
+  };
+};
+
+const extractCollegeEstablishedYear = (college) => {
+  const rawYear = pickFirstNonEmpty(
+    college?.established_year,
+    college?.established,
+    college?.basic?.established_year,
+    unwrapCmsValue(college?.cms?.basic?.established_year),
+    college?.rawScraped?.established_year,
+    college?.rawScraped?.estd_year
+  );
+
+  if (!rawYear) return null;
+
+  const match = String(rawYear).match(/\b(18|19|20)\d{2}\b/);
+  if (match) {
+    return Number(match[0]);
+  }
+
+  return String(rawYear).trim() || null;
+};
+
+const extractCollegeAccreditation = (college) =>
+  pickFirstNonEmpty(
+    college?.basic?.accreditation,
+    unwrapCmsValue(college?.cms?.basic?.accreditation),
+    college?.accreditation,
+    college?.rawScraped?.accreditation
+  ) || null;
+
+const extractCollegeAffiliations = (college) => {
+  const candidates = [
+    college?.affiliations,
+    college?.affiliation,
+    college?.basic?.affiliations,
+    college?.basic?.affiliation,
+    unwrapCmsValue(college?.cms?.basic?.affiliations),
+    unwrapCmsValue(college?.cms?.basic?.affiliation),
+    college?.rawScraped?.affiliations,
+    college?.rawScraped?.affiliation,
+    college?.rawScraped?.affiliated_to,
+    college?.rawScraped?.affiliatedTo,
+  ];
+
+  for (const candidate of candidates) {
+    const plainValue = toPlainValue(candidate);
+
+    if (Array.isArray(plainValue)) {
+      const items = plainValue
+        .map((item) =>
+          pickFirstText(item?.name, item?.title, item?.value, item)
+        )
+        .filter(Boolean);
+
+      if (items.length) {
+        return items;
+      }
+    }
+
+    if (typeof plainValue === "string" && plainValue.trim()) {
+      return [plainValue.trim()];
+    }
+  }
+
+  return [];
+};
+
+const getCollegeCardData = (college) => {
+  const sourceIdRaw =
+    college?.source_college_id ??
+    unwrapCmsValue(college?.cms?.source_college_id) ??
+    college?.rawScraped?.source_college_id;
+  const sourceUrl = pickFirstNonEmpty(
+    college?.url,
+    unwrapCmsValue(college?.cms?.url),
+    college?.rawScraped?.url
+  );
+  const urlIdMatch = sourceUrl?.match(/\/(?:college|university)\/(\d+)-/i);
+  const urlIdNum = Number(urlIdMatch?.[1]);
+  const sourceIdNum = Number(sourceIdRaw);
+  const id =
+    college?.id ??
+    (Number.isFinite(sourceIdNum) ? sourceIdNum : null) ??
+    (Number.isFinite(urlIdNum) ? urlIdNum : null);
+
+  const name = pickFirstNonEmpty(
+    college?.name,
+    college?.basic?.name,
+    unwrapCmsValue(college?.cms?.basic?.name)
+  );
+
+  const city = pickFirstNonEmpty(
+    college?.basic?.city,
+    unwrapCmsValue(college?.cms?.basic?.city)
+  );
+  const state = pickFirstNonEmpty(
+    college?.basic?.state,
+    unwrapCmsValue(college?.cms?.basic?.state)
+  );
+
+  const location = pickFirstNonEmpty(
+    college?.location,
+    [city, state].filter(Boolean).join(", ")
+  );
+
+  const heroImage = pickFirstNonEmpty(
+    college?.heroImage,
+    college?.heroImages?.[0],
+    college?.gallery?.[0]?.src,
+    unwrapCmsValue(college?.cms?.gallery?.[0]?.src)
+  );
+
+  const logoUrl = pickFirstNonEmpty(
+    college?.logoUrl,
+    college?.basic?.logo,
+    unwrapCmsValue(college?.cms?.basic?.logo),
+    college?.rawScraped?.logo
+  );
+
+  const stream = inferStreamFromCollege(college);
+  const feesRange = extractFeesRangeFromCollege(college);
+  const ranking = extractRankingFromCollege(college);
+  const ratingMeta = extractRatingAndReviews(college);
+  const packageHighlights = extractCollegePackageHighlights(college);
+  const establishedYear = extractCollegeEstablishedYear(college);
+  const avgFees =
+    Number.isFinite(college?.avg_fees)
+      ? college.avg_fees
+      : computeAverageFees(feesRange);
+  return {
+    id,
+    name,
+    location,
+    established_year: establishedYear,
+    rating: ratingMeta.rating,
+    reviewCount: ratingMeta.reviewCount,
+    heroImage,
+    imageUrl: heroImage,
+    logoUrl,
+    stream,
+    feesRange,
+    ranking,
+    avg_fees: avgFees,
+    package_highlights: packageHighlights,
+  };
+}; 
+
+// ===============================
+// COURSE LEVEL NORMALIZER
+// ===============================
+
+const normalizeLevel = (text) => {
+
+  if (!text) return null;
+
+  text = text.toLowerCase();
+
+  if (text.includes("undergraduate") || text.includes("bachelor")) {
+    return "Undergraduate";
+  }
+
+  if (text.includes("postgraduate") || text.includes("master")) {
+    return "Postgraduate";
+  }
+
+  if (text.includes("doctor")) {
+    return "Doctorate";
+  }
+
+  if (text.includes("diploma")) {
+    return "Diploma";
+  }
+
+  if (text.includes("certificate")) {
+    return "Certificate";
+  }
+
+  return null;
+};
+
+const getCollegeBackfillPayload = (college, card) => {
+  const $set = {};
+
+  if (!college?.id && Number.isFinite(card.id)) $set.id = card.id;
+  if (!college?.name && card.name) $set.name = card.name;
+  if (!college?.location && card.location) $set.location = card.location;
+  if (!college?.stream && card.stream) $set.stream = card.stream;
+  if (!college?.heroImage && card.heroImage) $set.heroImage = card.heroImage;
+  if ((!Array.isArray(college?.heroImages) || !college.heroImages.length) && card.heroImage) {
+    $set.heroImages = [card.heroImage];
+    $set.heroDownloaded = true;
+  }
+  if (!normalizeExistingFeesRange(college?.feesRange) && card.feesRange) {
+    $set.feesRange = card.feesRange;
+  }
+  if ((college?.rating === null || college?.rating === undefined) && card.rating !== null) {
+    $set.rating = card.rating;
+  }
+  if ((college?.reviewCount === null || college?.reviewCount === undefined) && card.reviewCount > 0) {
+    $set.reviewCount = card.reviewCount;
+  }
+  // ===== AUTO BACKFILL AVG FEES =====
+if (
+  (college?.avg_fees === null || college?.avg_fees === undefined) &&
+  Number.isFinite(card.avg_fees)
+) {
+  $set.avg_fees = card.avg_fees;
+}
+
+  return Object.keys($set).length ? { $set } : null;
+};
+
+const COLLEGE_CARD_CACHE_TTL_MS = 60 * 60 * 1000;
+let collegeCardCatalogCache = {
+  expiresAt: 0,
+  value: null,
+  promise: null,
+};
+
+const resetCollegeCardCatalogCache = () => {
+  collegeCardCatalogCache = {
+    expiresAt: 0,
+    value: null,
+    promise: null,
+  };
+};
+
+const COLLEGE_CARD_PROJECTION = {
+  id: 1,
+  name: 1,
+  established_year: 1,
+  established: 1,
+  location: 1,
+  stream: 1,
+  heroImage: 1,
+  heroImages: 1,
+  gallery: 1,
+  logoUrl: 1,
+  feesRange: 1,
+  avg_fees: 1,
+  ranking: 1,
+  rating: 1,
+  reviewCount: 1,
+  type: 1,
+  accreditation: 1,
+  url: 1,
+  source_college_id: 1,
+  createdAt: 1,
+  basic: 1,
+  about: 1,
+  admission: 1,
+  "placement.package_highlights": 1,
+  "placement.packageHighlights": 1,
+  "cms.source_college_id": 1,
+  "cms.url": 1,
+  "cms.gallery": 1,
+  "cms.basic": 1,
+  "cms.about": 1,
+  "cms.admission": 1,
+  "cms.ranking": 1,
+  "cms.reviews_page": 1,
+  reviews_page: 1,
+  "rawScraped.source_college_id": 1,
+  "rawScraped.url": 1,
+  "rawScraped.logo": 1,
+  "rawScraped.feesRange": 1,
+  "rawScraped.ranking": 1,
+  "rawScraped.ranking_data": 1,
+  "rawScraped.rating": 1,
+  "rawScraped.review_count": 1,
+  "rawScraped.reviews_page": 1,
+  "rawScraped.accreditation": 1,
+  "rawScraped.established_year": 1,
+  "rawScraped.estd_year": 1,
+  "rawScraped.placement.package_highlights": 1,
+};
+
+const buildCollegeCardCacheEntry = (college = {}) => {
+  const card = getCollegeCardData(college);
+  const objectId = String(college?._id || "");
+  const createdAt = college?.createdAt ? new Date(college.createdAt).getTime() : 0;
+  const city = college?.basic?.city || null;
+  const state = college?.basic?.state || null;
+  const collegeType = college?.basic?.college_type || college?.type || null;
+  const accreditation = extractCollegeAccreditation(college);
+
+  return {
+    objectId,
+    collegeId: Number.isFinite(Number(card.id)) ? Number(card.id) : null,
+    createdAt,
+    card,
+    listing: {
+      _id: college?._id,
+      id: card.id,
+      name: card.name,
+      location: card.location,
+      established_year: card.established_year,
+      city,
+      state,
+      college_id: card.id,
+      heroImage: card.heroImage,
+      imageUrl: card.imageUrl,
+      ranking: card.ranking,
+      rating: card.rating,
+      reviewCount: card.reviewCount,
+      stream: card.stream,
+      logoUrl: card.logoUrl,
+      feesRange: card.feesRange,
+      college_type: collegeType,
+      accreditation,
+      avg_fees: card.avg_fees,
+      package_highlights: card.package_highlights,
+    },
+    listItem: {
+      id: card.id,
+      name: card.name,
+      location: card.location,
+      established_year: card.established_year,
+      rating: card.rating,
+      type: collegeType,
+      createdAt: college?.createdAt || null,
+      package_highlights: card.package_highlights,
+    },
+  };
+};
+
+const getCollegeCardCatalog = async () => {
+  if (
+    collegeCardCatalogCache.value &&
+    collegeCardCatalogCache.expiresAt > Date.now()
+  ) {
+    return collegeCardCatalogCache.value;
+  }
+
+  if (collegeCardCatalogCache.promise) {
+    return collegeCardCatalogCache.promise;
+  }
+
+  collegeCardCatalogCache.promise = (async () => {
+    const docs = await College.find({}, COLLEGE_CARD_PROJECTION).lean();
+    const entries = docs.map((college) => buildCollegeCardCacheEntry(college));
+    const byObjectId = new Map();
+    const byCollegeId = new Map();
+    const list = [];
+
+    entries.forEach((entry) => {
+      if (entry.objectId) {
+        byObjectId.set(entry.objectId, entry);
+      }
+
+      if (entry.collegeId && !byCollegeId.has(entry.collegeId)) {
+        byCollegeId.set(entry.collegeId, entry);
+      }
+
+      list.push(entry.listItem);
+    });
+
+    list.sort((a, b) => {
+      const aTime = a?.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const bTime = b?.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return bTime - aTime;
+    });
+
+    const value = {
+      total: entries.length,
+      byObjectId,
+      byCollegeId,
+      list,
+    };
+
+    collegeCardCatalogCache = {
+      expiresAt: Date.now() + COLLEGE_CARD_CACHE_TTL_MS,
+      value,
+      promise: null,
+    };
+
+    return value;
+  })();
+
+  try {
+    return await collegeCardCatalogCache.promise;
+  } catch (error) {
+    collegeCardCatalogCache.promise = null;
+    throw error;
+  }
+};
 
 app.post("/api/chat-registration", async (req, res) => {
   try {
@@ -1088,6 +2426,7 @@ app.post(
 
 
       const saved = await college.save();
+      resetCollegeCardCatalogCache();
 
       res.status(201).json({
         success: true,
@@ -1195,10 +2534,8 @@ ${urls.map(url => `
 });
 
 
-
-
 app.get(
-  "/api/colleges",
+  "/api/college",
   asyncHandler(async (req, res) => {
 
     // ✅ DEFAULT: return ALL colleges (up to 100)
@@ -1209,54 +2546,126 @@ app.get(
     const q = req.query.q
       ? { $text: { $search: req.query.q } }
       : {};
+    const hasSearch = Boolean(req.query.q);
 
-    // fetch data
-    let data = await College.find(q)
-      .sort({ rating: -1, createdAt: -1 }) // optional: better ordering
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
+    const [catalog, refs, total] = await Promise.all([
+      getCollegeCardCatalog(),
+      College.find(q, { _id: 1 })
+        .sort({ rating: -1, createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      hasSearch ? College.countDocuments(q) : Promise.resolve(null),
+    ]);
 
-    // normalize data for frontend
-    data = data.map(c => {
-
-      const ranking2025 = Array.isArray(c.rawScraped?.ranking_data)
-        ? c.rawScraped.ranking_data.find(r =>
-          r.ranking?.includes("2025")
-        )?.ranking ?? null
-        : null;
-
-      return {
-        ...c,
-
-        // hero image
-        imageUrl: c.heroImages?.[0] ?? null,
-
-        // logo
-        logoUrl: c.rawScraped?.logo ?? null,
-
-        // normalize fields
-        type: c.type ?? null,
-        stream: c.rawScraped?.stream ?? null,
-        ranking: ranking2025,
-        feesRange: c.rawScraped?.feesRange ?? null,
-      };
-    });
-
-    const total = await College.countDocuments(q);
+    const data = refs
+      .map((doc) => catalog.byObjectId.get(String(doc?._id || ""))?.card)
+      .filter(Boolean);
 
     res.json({
       success: true,
       page,
       limit,
-      total,
+      total: total ?? catalog.total,
       data,
     });
   })
 );
 
 
+app.get("/api/colleges", asyncHandler(async (req, res) => {
+  const page = Math.max(parseInt(req.query.page) || 1, 1);
+  const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+
+  {
+    const [catalog, refs] = await Promise.all([
+      getCollegeCardCatalog(),
+      College.find({}, { _id: 1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+    ]);
+
+    const data = refs
+      .map((doc) => catalog.byObjectId.get(String(doc?._id || ""))?.listing)
+      .filter(Boolean);
+
+    return res.json({
+      success: true,
+      page,
+      limit,
+      total: catalog.total,
+      data
+    });
+  }
+
+  const colleges = await College.find({})
+    .skip((page - 1) * limit)
+    .limit(limit)
+    .lean();
+
+  const updateOps = [];
+  const data = colleges.map(c => {
+
+    const card = getCollegeCardData(c);
+    const update = getCollegeBackfillPayload(c, card);
+
+    if (update) {
+      updateOps.push({
+        updateOne: {
+          filter: { _id: c._id },
+          update
+        }
+      });
+    }
+
+    return {
+      _id: c._id,
+    
+       id: card.id,              // 🔥 required
+  name: card.name,          // 🔥 required
+  location: card.location,  
+  city: c?.basic?.city || null,
+  state: c?.basic?.state || null,
+      college_id: card.id,
+      heroImage: card.heroImage,
+      imageUrl: card.imageUrl,
+      ranking: card.ranking,
+      rating: card.rating,
+      reviewCount: card.reviewCount,
+      stream: card.stream,
+      logoUrl: card.logoUrl,
+      feesRange: card.feesRange,
+      college_type: c?.basic?.college_type || c?.type || null,
+       accreditation:
+    c?.basic?.accreditation ||
+    c?.accreditation ||
+    c?.rawScraped?.accreditation || 
+    null ,
+    avg_fees: card.avg_fees 
+   
+      // Include any other fields you want to return in the API response
+    };
+  });
+
+  if (updateOps.length) {
+    await College.bulkWrite(updateOps, { ordered: false });
+  }
+
+  res.json({
+    success: true,
+    page,
+    limit,
+    total: await College.countDocuments(),
+    data
+  });
+}));
 app.get("/api/colleges/list", asyncHandler(async (req, res) => {
+  {
+    const { list } = await getCollegeCardCatalog();
+    return res.json({ success: true, data: list });
+  }
+
   const colleges = await College.find(
     {},
     {
@@ -1274,15 +2683,145 @@ app.get("/api/colleges/list", asyncHandler(async (req, res) => {
   res.json({ success: true, data: colleges });
 }));
 
+// ================= COLLEGE COURSE CMS API (RAW, NO TRANSFORM) =================
+app.get("/api/college-course", asyncHandler(async (req, res) => {
+  const page = Math.max(parseInt(req.query.page) || 1, 1);
+  const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+  const { source, college_id, slug_url } = req.query;
+  const parsedCollegeId =
+    college_id !== undefined && college_id !== null && college_id !== ""
+      ? Number(college_id)
+      : null;
+
+  const query = {};
+  if (source) query.source = source;
+  if (parsedCollegeId !== null) {
+    if (Number.isNaN(parsedCollegeId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid college_id",
+      });
+    }
+    query.college_id = parsedCollegeId;
+  }
+  if (slug_url) {
+    query.$or = [
+      { "courses.slug_url": slug_url },
+      { "courses.sub_courses.slug_url.value": slug_url },
+    ];
+  }
+
+  let model = CollegeCourseCMS;
+  let total = await CollegeCourseCMS.countDocuments(query);
+  let docs = await CollegeCourseCMS.find(query)
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .skip((page - 1) * limit)
+    .limit(limit)
+    .lean();
+
+  // Fallback if collection is saved as "college course"
+  if (!docs.length) {
+    const altTotal = await CollegeCourseCMSSpace.countDocuments(query);
+    const altDocs = await CollegeCourseCMSSpace.find(query)
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
+
+    if (altDocs.length) {
+      model = CollegeCourseCMSSpace;
+      total = altTotal;
+      docs = altDocs;
+    }
+  }
+
+  const detectedCollegeId =
+    parsedCollegeId !== null
+      ? parsedCollegeId
+      : (docs.length ? (Number(docs[0]?.college_id) || null) : null);
+
+  res.json({
+    success: true,
+    collection: model.collection.name,
+    college_id: detectedCollegeId,
+    page,
+    limit,
+    total,
+    data: docs,
+  });
+}));
+
+app.get("/api/college-course/college/:college_id", asyncHandler(async (req, res) => {
+  const collegeId = Number(req.params.college_id);
+  if (Number.isNaN(collegeId)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid college_id",
+    });
+  }
+
+  let docs = await CollegeCourseCMS.find({ college_id: collegeId })
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .lean();
+  let collectionName = CollegeCourseCMS.collection.name;
+
+  if (!docs.length) {
+    docs = await CollegeCourseCMSSpace.find({ college_id: collegeId })
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .lean();
+    collectionName = CollegeCourseCMSSpace.collection.name;
+  }
+
+  res.json({
+    success: true,
+    collection: collectionName,
+    college_id: collegeId,
+    total: docs.length,
+    data: docs,
+  });
+}));
+
+app.get("/api/college-course/:id", asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid document id",
+    });
+  }
+
+  let doc = await CollegeCourseCMS.findById(id).lean();
+  let collectionName = CollegeCourseCMS.collection.name;
+
+  if (!doc) {
+    doc = await CollegeCourseCMSSpace.findById(id).lean();
+    collectionName = CollegeCourseCMSSpace.collection.name;
+  }
+
+  if (!doc) {
+    return res.status(404).json({
+      success: false,
+      message: "Course document not found",
+    });
+  }
+
+  res.json({
+    success: true,
+    collection: collectionName,
+    data: doc,
+  });
+}));
+
 // Read single
-app.get(
-  "/api/colleges/:id",
-  asyncHandler(async (req, res) => {
-    const college = await College.findOne({ id: Number(req.params.id) });
-    if (!college) return sendError(res, "College not found", 404);
-    res.json({ success: true, data: college });
-  })
-);
+app.get("/api/colleges/:id", async (req, res) => {
+  const college = await College.findOne({ id: Number(req.params.id) }).lean();
+  if (!college) return res.status(404).json({ success: false });
+
+  res.json({
+    success: true,
+    data: stripObjectKeyDeep(college, "header_highlights"),
+  });
+});
 
 app.put(
   "/api/colleges/:id/hero-image",
@@ -1323,6 +2862,7 @@ app.put(
         }
       }
     );
+    resetCollegeCardCatalogCache();
 
     res.json({
       success: true,
@@ -1337,6 +2877,7 @@ app.delete(
   asyncHandler(async (req, res) => {
     const deleted = await College.findOneAndDelete({ id: Number(req.params.id) });
     if (!deleted) return sendError(res, "College not found", 404);
+    resetCollegeCardCatalogCache();
     emit("college:deleted", { id: Number(req.params.id) });
     res.json({ success: true, message: "College deleted" });
   })
@@ -1433,80 +2974,1101 @@ app.get(
         { align: "center" }
       );
 
-    doc.end();
+doc.end();
   })
 );
 
+const MAIN_COURSE_CACHE_TTL_MS = 60 * 60 * 1000;
+let mainCourseCatalogCache = {
+  expiresAt: 0,
+  value: null,
+  promise: null,
+};
 
-app.get(
-  "/api/course/:slug",
-  asyncHandler(async (req, res) => {
+let mainCourseDetailCache = {
+  expiresAt: 0,
+  value: new Map(),
+  pending: new Map(),
+};
 
-    // 1️⃣ URL decode
-    const slug = decodeURIComponent(req.params.slug).trim();
-    console.log("🔹 Requested slug:", slug);
+const MAIN_COURSE_SUMMARY_PROJECTION = {
+  stream: 1,
+  source_url: 1,
+  final_url: 1,
+  course: 1,
+  "course_detail.url": 1,
+  "course_detail.toc_sections": 1,
+  "syllabus_detail.url": 1,
+  course_name: 1,
+  name: 1,
+  mode: 1,
+  duration: 1,
+  fees: 1,
+  collegeId: 1,
+  college_id: 1,
+  details: 1,
+  title: 1,
+  full_name: 1,
+  slug: 1,
+};
 
-    // 2️⃣ Regex safe banana (dot, spaces, case issue fix)
-    const nameRegex = new RegExp(
-      "^" +
-      slug
-        .replace(/\./g, "\\.")     // dot fix
-        .replace(/\s+/g, "\\s*")   // space flexible
-      + "$",
-      "i" // case-insensitive
-    );
+const MAIN_COURSE_DETAIL_PROJECTION = {
+  stream: 1,
+  source_url: 1,
+  final_url: 1,
+  course: 1,
+  course_detail: 1,
+  syllabus_detail: 1,
+  course_name: 1,
+  name: 1,
+  mode: 1,
+  duration: 1,
+  fees: 1,
+  collegeId: 1,
+  college_id: 1,
+  details: 1,
+  title: 1,
+  full_name: 1,
+  slug: 1,
+};
 
-    // 3️⃣ College collection me search
-    const college = await College.findOne(
-      {
-        $or: [
-          { "courses.name": nameRegex },
-          { "courses_full_time.name": nameRegex },
-          { "courses_part_time.name": nameRegex }
-        ]
-      },
-      {
-        name: 1,
-        id: 1,
-        courses: { $elemMatch: { name: nameRegex } },
-        courses_full_time: { $elemMatch: { name: nameRegex } },
-        courses_part_time: { $elemMatch: { name: nameRegex } }
+const collectCourseMatchKeys = (node = {}, extraValues = []) => {
+  const keys = new Set();
+
+  [
+    node?.slug,
+    node?.slug_url,
+    node?.url,
+    node?.final_url,
+    node?.course_name,
+    node?.name,
+    node?.title,
+    node?.heading,
+    ...extraValues,
+  ].forEach((value) => addCourseMatchKey(keys, value));
+
+  return keys;
+};
+
+const createCollegeCourseOffering = (doc, node, parentNode = null) => {
+  const baseCourseName = pickFirstText(
+    parentNode?.course_name,
+    parentNode?.name,
+    parentNode?.title
+  );
+  const nodeCourseName = pickFirstText(
+    node?.course_name,
+    node?.sub_course_name,
+    node?.name,
+    node?.title,
+    node?.heading,
+    node?.specialization
+  );
+  const baseCourseKey = toCourseMatchKey(baseCourseName);
+  const nodeCourseKey = toCourseMatchKey(nodeCourseName);
+  const courseName =
+    parentNode &&
+    nodeCourseName &&
+    baseCourseName &&
+    nodeCourseKey &&
+    baseCourseKey &&
+    !nodeCourseKey.includes(baseCourseKey)
+      ? `${baseCourseName} (${nodeCourseName})`
+      : nodeCourseName || baseCourseName;
+
+  const slug = getPreferredCourseSlug(
+    node?.slug_url,
+    node?.course_url,
+    node?.url,
+    node?.final_url,
+    courseName
+  );
+
+  const matchKeys = collectCourseMatchKeys(
+    node,
+    courseName && courseName !== nodeCourseName ? [courseName] : []
+  );
+
+  if (parentNode && !slug && !nodeCourseName && !matchKeys.size) {
+    return null;
+  }
+
+  if (slug) matchKeys.add(toCourseMatchKey(slug));
+  if (courseName) matchKeys.add(toCourseMatchKey(courseName));
+
+  return {
+    offeringKey: [
+      getNumericId(doc?.college_id) || "na",
+      slug || slugifyCourseText(courseName) || "unknown",
+    ].join(":"),
+    college_id: getNumericId(doc?.college_id),
+    course_name: courseName || "",
+    slug_url: slug || "",
+    mode: pickFirstText(
+      node?.mode,
+      node?.study_mode,
+      parentNode?.mode,
+      parentNode?.study_mode
+    ),
+    duration: pickFirstText(node?.duration, parentNode?.duration),
+    avg_fees: extractCourseFees(node, parentNode),
+    source_url: pickFirstText(doc?.url),
+    match_source: parentNode ? "sub_course" : "course",
+    matchKeys: Array.from(matchKeys).filter(Boolean),
+  };
+};
+
+const addOfferingToLookup = (lookup, offering) => {
+  if (!offering || !Array.isArray(offering.matchKeys) || !offering.matchKeys.length) {
+    return;
+  }
+
+  offering.matchKeys.forEach((key) => {
+    if (!key) return;
+
+    if (!lookup.has(key)) {
+      lookup.set(key, new Map());
+    }
+
+    lookup.get(key).set(offering.offeringKey, offering);
+  });
+};
+
+const buildCollegeCourseLookup = (docs = []) => {
+  const lookup = new Map();
+
+  docs.forEach((doc) => {
+    const courses = Array.isArray(doc?.courses) ? doc.courses : [];
+
+    courses.forEach((courseNode) => {
+      addOfferingToLookup(lookup, createCollegeCourseOffering(doc, courseNode));
+
+      toArrayValue(courseNode?.sub_courses).forEach((subCourseNode) => {
+        addOfferingToLookup(
+          lookup,
+          createCollegeCourseOffering(doc, subCourseNode, courseNode)
+        );
+      });
+    });
+  });
+
+  return lookup;
+};
+
+const mergeOfferingsForKeys = (lookup, keys = []) => {
+  const merged = new Map();
+
+  keys.forEach((key) => {
+    const offerings = lookup.get(key);
+    if (!offerings) return;
+
+    offerings.forEach((offering, offeringKey) => {
+      merged.set(offeringKey, offering);
+    });
+  });
+
+  return Array.from(merged.values());
+};
+
+const summarizeOfferingsForKeys = (lookup, keys = []) => {
+  const offeringKeys = new Set();
+  const collegeIds = new Set();
+  const feeValues = [];
+  let mode = "";
+  let duration = "";
+
+  keys.forEach((key) => {
+    const offerings = lookup.get(key);
+    if (!offerings) return;
+
+    offerings.forEach((offering, offeringKey) => {
+      if (offeringKeys.has(offeringKey)) return;
+      offeringKeys.add(offeringKey);
+
+      if (offering.college_id) collegeIds.add(offering.college_id);
+      if (Number.isFinite(offering.avg_fees)) {
+        feeValues.push(offering.avg_fees);
       }
+      if (!mode && offering.mode) mode = offering.mode;
+      if (!duration && offering.duration) duration = offering.duration;
+    });
+  });
+
+  return {
+    collegeIds,
+    feeValues,
+    mode,
+    duration,
+  };
+};
+
+const extractMainCourseAboutParagraphs = (section) =>
+  toArrayValue(section?.about)
+    .map((item) => pickFirstText(item?.value, item))
+    .filter(Boolean);
+
+const extractMainCourseRecord = (doc = {}, options = {}) => {
+  const { includeDetails = false } = options;
+  const rawCourse = toPlainValue(doc?.course);
+  const rawCourseDetail = toPlainValue(doc?.course_detail);
+  const rawSyllabusDetail = toPlainValue(doc?.syllabus_detail);
+  const courseNode =
+    rawCourse && typeof rawCourse === "object" && !Array.isArray(rawCourse)
+      ? rawCourse
+      : {};
+  const courseDetail =
+    rawCourseDetail &&
+    typeof rawCourseDetail === "object" &&
+    !Array.isArray(rawCourseDetail)
+      ? rawCourseDetail
+      : {};
+  const syllabusDetail =
+    rawSyllabusDetail &&
+    typeof rawSyllabusDetail === "object" &&
+    !Array.isArray(rawSyllabusDetail)
+      ? rawSyllabusDetail
+      : {};
+
+  const courseName = pickFirstText(
+    courseNode?.course_name,
+    doc?.course_name,
+    doc?.name,
+    courseNode?.name,
+    doc?.title,
+    doc?.full_name,
+    doc?.details?.heading
+  );
+
+  const slug = getPreferredCourseSlug(
+    doc?.final_url,
+    courseDetail?.url,
+    syllabusDetail?.url,
+    doc?.source_url,
+    doc?.slug,
+    courseName
+  );
+
+  const matchKeys = new Set();
+  [
+    doc?.final_url,
+    courseDetail?.url,
+    syllabusDetail?.url,
+    doc?.source_url,
+    doc?.slug,
+    courseNode?.slug_url,
+    courseName,
+  ].forEach((value) => addCourseMatchKey(matchKeys, value));
+
+  if (slug) matchKeys.add(toCourseMatchKey(slug));
+
+  const courseSummary = extractCourseSummaryFromFirstTocTable(courseDetail);
+
+  const record = {
+    id: String(doc?._id || ""),
+    slug,
+    matchKeys: Array.from(matchKeys).filter(Boolean),
+    stream: pickFirstText(doc?.stream),
+    source_url: pickFirstText(doc?.source_url),
+    final_url: pickFirstText(
+      doc?.final_url,
+      courseDetail?.url,
+      syllabusDetail?.url
+    ),
+    course_name: courseName || "",
+    mode: pickFirstText(courseNode?.mode, doc?.mode),
+    duration: pickFirstText(courseNode?.duration, doc?.duration),
+    course_level: courseSummary.course_level || pickFirstText(courseNode?.level, doc?.level),
+    avg_fees: courseSummary.avg_fees ?? extractCourseFees(doc, courseNode),
+    college_id: getNumericId(doc?.collegeId, doc?.college_id),
+  };
+
+  if (includeDetails) {
+    record.course = courseNode;
+    record.course_detail = courseDetail;
+    record.syllabus_detail = syllabusDetail;
+    record.raw_doc = doc;
+  }
+
+  return record;
+};
+
+const buildMainCourseCatalog = (mainCourseDocs = [], lookup = new Map()) => {
+  const groupedCourses = new Map();
+
+  mainCourseDocs
+    .map((doc) => extractMainCourseRecord(doc))
+    .forEach((record) => {
+      const canonicalKey =
+        (record.slug && toCourseMatchKey(record.slug)) ||
+        record.matchKeys[0] ||
+        toCourseMatchKey(record.course_name);
+
+      if (!canonicalKey) return;
+
+      if (!groupedCourses.has(canonicalKey)) {
+        groupedCourses.set(canonicalKey, {
+          key: canonicalKey,
+          slug: record.slug || cleanCourseSlug(record.course_name),
+          matchKeys: new Set(record.matchKeys),
+          recordIds: [],
+          mainCourseCollegeIds: new Set(),
+          fallbackFees: [],
+          course_name: record.course_name,
+          course_level: record.course_level,
+          mode: record.mode,
+          duration: record.duration,
+          stream: record.stream,
+          source_url: record.source_url,
+          final_url: record.final_url,
+        });
+      }
+
+      const group = groupedCourses.get(canonicalKey);
+
+      record.matchKeys.forEach((key) => group.matchKeys.add(key));
+      if (record.id) {
+        group.recordIds.push(record.id);
+      }
+
+      if (record.college_id) group.mainCourseCollegeIds.add(record.college_id);
+      if (record.avg_fees !== null) group.fallbackFees.push(record.avg_fees);
+      if (!group.slug && record.slug) group.slug = record.slug;
+      if (!group.course_name && record.course_name) group.course_name = record.course_name;
+      if (!group.course_level && record.course_level) group.course_level = record.course_level;
+      if (!group.mode && record.mode) group.mode = record.mode;
+      if (!group.duration && record.duration) group.duration = record.duration;
+      if (!group.stream && record.stream) group.stream = record.stream;
+      if (!group.source_url && record.source_url) group.source_url = record.source_url;
+      if (!group.final_url && record.final_url) group.final_url = record.final_url;
+    });
+
+  const cards = [];
+  const groupsByKey = new Map();
+
+  groupedCourses.forEach((group) => {
+    const offeringSummary = summarizeOfferingsForKeys(
+      lookup,
+      Array.from(group.matchKeys)
     );
 
-    // 4️⃣ Agar kuch bhi nahi mila
-    if (!college) {
-      return res.status(404).json({
-        success: false,
-        error: "Course not found"
-      });
+    const collegeIds = new Set(group.mainCourseCollegeIds);
+    offeringSummary.collegeIds.forEach((collegeId) => collegeIds.add(collegeId));
+    const collegeFeeValues = offeringSummary.feeValues;
+
+    if (!group.mode && offeringSummary.mode) group.mode = offeringSummary.mode;
+    if (!group.duration && offeringSummary.duration) {
+      group.duration = offeringSummary.duration;
     }
 
-    // 5️⃣ Course nikaalo (jis array me mila ho)
-    const course =
-      college.courses?.[0] ||
-      college.courses_full_time?.[0] ||
-      college.courses_part_time?.[0];
+    const totalCollegeCount = collegeIds.size;
+    const avgFees =
+      averageNumbers(group.fallbackFees) ??
+      averageNumbers(collegeFeeValues);
+    const slug = group.slug || cleanCourseSlug(group.course_name);
+    const summary = {
+      slug,
+      name: group.course_name,
+      course_name: group.course_name,
+      course_level: group.course_level || "N/A",
+      mode: group.mode || "N/A",
+      duration: group.duration || "N/A",
+      level: group.course_level || "N/A",
+      avg_fees: avgFees,
+      fees: avgFees,
+      total_college_count: totalCollegeCount,
+      totalColleges: totalCollegeCount,
+      stream: group.stream || "",
+      source_url: group.source_url || null,
+      final_url: group.final_url || null,
+      tier: getCourseTier(totalCollegeCount),
+    };
 
-    if (!course) {
-      return res.status(404).json({
-        success: false,
-        error: "Course not found"
-      });
-    }
+    const detail = {
+      ...summary,
+      match_keys: Array.from(group.matchKeys),
+      record_ids: Array.from(new Set(group.recordIds)),
+    };
 
-    // 6️⃣ SUCCESS RESPONSE
-    res.json({
-      success: true,
-      courseKey: course.name,
-      courseIds: [course.id],
-      college: {
-        id: college.id,
-        name: college.name
+    cards.push(summary);
+
+    group.matchKeys.forEach((key) => {
+      if (!groupsByKey.has(key)) {
+        groupsByKey.set(key, detail);
       }
     });
-  })
-);
+
+    if (slug) {
+      groupsByKey.set(toCourseMatchKey(slug), detail);
+    }
+  });
+
+  cards.sort((a, b) => {
+    if (b.total_college_count !== a.total_college_count) {
+      return b.total_college_count - a.total_college_count;
+    }
+    return (a.course_name || "").localeCompare(b.course_name || "");
+  });
+
+  return { cards, groupsByKey };
+};
+
+const loadCollegeCourseCmsDocs = async (
+  query = {},
+  projection = { college_id: 1, url: 1, courses: 1 }
+) => {
+  let docs = await CollegeCourseCMS.find(query, projection).lean();
+  let collectionName = CollegeCourseCMS.collection.name;
+
+  if (!docs.length) {
+    docs = await CollegeCourseCMSSpace.find(query, projection).lean();
+    collectionName = CollegeCourseCMSSpace.collection.name;
+  }
+
+  return { docs, collectionName };
+};
+
+const loadMainCourseDetailRecords = async (recordIds = []) => {
+  const ids = Array.from(
+    new Set(
+      recordIds
+        .map((recordId) => String(recordId || "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (!ids.length) return [];
+
+  const docs = await MainCourse.find(
+    { _id: { $in: ids } },
+    MAIN_COURSE_DETAIL_PROJECTION
+  )
+    .sort({ updatedAt: -1, createdAt: -1 })
+    .lean();
+
+  return docs.map((doc) => extractMainCourseRecord(doc, { includeDetails: true }));
+};
+
+const getMainCourseCatalog = async () => {
+  if (
+    mainCourseCatalogCache.value &&
+    mainCourseCatalogCache.expiresAt > Date.now()
+  ) {
+    return mainCourseCatalogCache.value;
+  }
+
+  if (mainCourseCatalogCache.promise) {
+    return mainCourseCatalogCache.promise;
+  }
+
+  mainCourseCatalogCache.promise = (async () => {
+    const [mainCourseDocs, { docs: collegeCourseDocs, collectionName }] =
+      await Promise.all([
+        MainCourse.find({}, MAIN_COURSE_SUMMARY_PROJECTION).lean(),
+        loadCollegeCourseCmsDocs(),
+      ]);
+
+    const lookup = buildCollegeCourseLookup(collegeCourseDocs);
+    const catalog = buildMainCourseCatalog(mainCourseDocs, lookup);
+    const value = {
+      ...catalog,
+      lookup,
+      college_course_collection: collectionName,
+    };
+
+    mainCourseCatalogCache = {
+      expiresAt: Date.now() + MAIN_COURSE_CACHE_TTL_MS,
+      value,
+      promise: null,
+    };
+
+    mainCourseDetailCache = {
+      expiresAt: mainCourseCatalogCache.expiresAt,
+      value: new Map(),
+      pending: new Map(),
+    };
+
+    return value;
+  })();
+
+  try {
+    return await mainCourseCatalogCache.promise;
+  } catch (error) {
+    mainCourseCatalogCache.promise = null;
+    throw error;
+  }
+};
+
+const pickPrimaryMainCourseRecord = (records = []) => {
+  if (!records.length) return null;
+
+  return records.reduce((best, current) => {
+    const bestScore =
+      (Object.keys(best?.course_detail || {}).length ? 2 : 0) +
+      (Object.keys(best?.syllabus_detail || {}).length ? 1 : 0) +
+      (best?.course_name ? 1 : 0);
+    const currentScore =
+      (Object.keys(current?.course_detail || {}).length ? 2 : 0) +
+      (Object.keys(current?.syllabus_detail || {}).length ? 1 : 0) +
+      (current?.course_name ? 1 : 0);
+
+    return currentScore > bestScore ? current : best;
+  }, records[0]);
+};
+
+const enrichOfferingsWithCollegeData = async (offerings = []) => {
+  const { byCollegeId } = await getCollegeCardCatalog();
+
+  const allCollegesData = offerings
+    .map((offering) => {
+      const collegeId = Number(offering.college_id);
+      const college = byCollegeId.get(collegeId);
+      const rating = parseNumericValue(college?.card?.rating) ?? 0;
+
+      return {
+        name: offering.course_name || "",
+        collegeId,
+        collegeName: college?.card?.name || "",
+        rating,
+        fees: offering.avg_fees ?? "N/A",
+        avg_fees: offering.avg_fees ?? null,
+        duration: offering.duration || "N/A",
+        mode: offering.mode || "N/A",
+        slug_url: offering.slug_url || "",
+        source_url: offering.source_url || "",
+        details: {
+          heading: offering.course_name || "",
+        },
+      };
+    })
+    .sort((a, b) => b.rating - a.rating);
+
+  const uniqueCollegeCards = new Map();
+
+  allCollegesData.forEach((row) => {
+    if (uniqueCollegeCards.has(row.collegeId)) return;
+
+    const college = byCollegeId.get(row.collegeId);
+    uniqueCollegeCards.set(row.collegeId, {
+      id: row.collegeId,
+      name: college?.card?.name || row.collegeName || "",
+      rating: row.rating,
+      image: college?.card?.heroImage || null,
+      logo: college?.card?.logoUrl || null,
+      location: college?.card?.location || null,
+    });
+  });
+
+  return {
+    allCollegesData,
+    collegesOffering: Array.from(uniqueCollegeCards.values()),
+  };
+};
+
+const findMainCourseDetail = async (slug) => {
+  const catalog = await getMainCourseCatalog();
+  const matchKey = toCourseMatchKey(decodeURIComponent(slug || ""));
+  const summary = catalog.groupsByKey.get(matchKey);
+
+  if (!summary) return null;
+
+  if (
+    mainCourseDetailCache.expiresAt > Date.now() &&
+    mainCourseDetailCache.value.has(matchKey)
+  ) {
+    return mainCourseDetailCache.value.get(matchKey);
+  }
+
+  if (mainCourseDetailCache.pending.has(matchKey)) {
+    return mainCourseDetailCache.pending.get(matchKey);
+  }
+
+  const pending = (async () => {
+    const records = await loadMainCourseDetailRecords(summary.record_ids);
+    const detail = {
+      ...summary,
+      college_course_collection: catalog.college_course_collection,
+      records,
+      matched_offerings: mergeOfferingsForKeys(catalog.lookup, summary.match_keys),
+      primaryRecord: pickPrimaryMainCourseRecord(records),
+    };
+
+    if (mainCourseDetailCache.expiresAt > Date.now()) {
+      mainCourseDetailCache.value.set(matchKey, detail);
+    }
+
+    return detail;
+  })();
+
+  mainCourseDetailCache.pending.set(matchKey, pending);
+
+  try {
+    return await pending;
+  } finally {
+    mainCourseDetailCache.pending.delete(matchKey);
+  }
+};
+
+const sendMainCourseCards = async (req, res, next) => {
+  const bucket = String(req.query.bucket || "all").trim().toLowerCase();
+ const page = 1;
+const limit = Infinity;
+  const searchText = String(req.query.search || req.query.q || "")
+    .trim()
+    .toLowerCase();
+  const stream = String(req.query.stream || "").trim().toLowerCase();
+
+  const { cards, college_course_collection } = await getMainCourseCatalog();
+
+  let filtered = cards;
+
+  if (bucket === "primary") {
+    filtered = filtered.filter((card) => card.tier === "primary");
+  } else if (bucket === "secondary") {
+    filtered = filtered.filter((card) =>
+      ["primary", "secondary"].includes(card.tier)
+    );
+  } else if (bucket === "longtail") {
+    filtered = filtered.filter((card) => card.tier === "longtail");
+  }
+
+  if (stream) {
+    filtered = filtered.filter(
+      (card) => String(card.stream || "").toLowerCase() === stream
+    );
+  }
+
+  if (searchText) {
+    const searchSlug = cleanCourseSlug(searchText);
+    filtered = filtered.filter((card) => {
+      const courseName = String(card.course_name || "").toLowerCase();
+      return (
+        courseName.includes(searchText) ||
+        String(card.slug || "").includes(searchSlug)
+      );
+    });
+  }
+
+  const total = filtered.length;
+  if (!total && req.path === "/api/courses/cards") {
+    return next();
+  }
+
+  const data = filtered;
+  res.json({
+    success: true,
+    bucket,
+    page,
+    limit,
+    total,
+    collection: MainCourse.collection.name,
+    college_course_collection,
+    data,
+  });
+};
+
+const sendMainCourseDetail = async (req, res, next) => {
+  const detail = await findMainCourseDetail(req.params.slug);
+
+  if (!detail) {
+    if (req.path.startsWith("/api/course/")) {
+      return next();
+    }
+
+    return res.status(404).json({
+      success: false,
+      message: "Course not found",
+    });
+  }
+
+  const { allCollegesData, collegesOffering } =
+    await enrichOfferingsWithCollegeData(detail.matched_offerings);
+
+  const primaryRecord = detail.primaryRecord;
+  const overviewParagraphs = extractMainCourseAboutParagraphs(
+    primaryRecord?.course_detail
+  );
+  const avgRating = averageNumbers(
+    allCollegesData.map((row) => parseNumericValue(row.rating))
+  );
+
+  res.json({
+    success: true,
+    collection: MainCourse.collection.name,
+    college_course_collection: detail.college_course_collection,
+    course: {
+      slug: detail.slug,
+      name: detail.course_name,
+      course_name: detail.course_name,
+      course_level: detail.course_level,
+      level: detail.course_level,
+      mode: detail.mode,
+      duration: detail.duration,
+      fees: detail.avg_fees,
+      avg_fees: detail.avg_fees,
+      totalColleges: detail.total_college_count,
+      total_college_count: detail.total_college_count,
+      avgRating: avgRating !== null ? avgRating.toFixed(1) : null,
+      stream: detail.stream,
+      source_url: detail.source_url,
+      final_url: detail.final_url,
+      details: {
+        heading: detail.course_name,
+        overview_full_text: overviewParagraphs.join("\n\n"),
+        overview_paragraphs: overviewParagraphs,
+        highlights: {},
+        course_detail: primaryRecord?.course_detail || null,
+        syllabus_detail: primaryRecord?.syllabus_detail || null,
+      },
+      course_data: primaryRecord?.course || null,
+      course_detail: primaryRecord?.course_detail || null,
+      syllabus_detail: primaryRecord?.syllabus_detail || null,
+    },
+    allCollegesData,
+    collegesOffering,
+  });
+};
+
+const sendMainCourseColleges = async (req, res, next) => {
+  const detail = await findMainCourseDetail(req.params.slug);
+
+  if (!detail) {
+    if (req.path.startsWith("/api/course/")) {
+      return next();
+    }
+
+    return res.status(404).json({
+      success: false,
+      message: "Course not found",
+    });
+  }
+
+  const { allCollegesData, collegesOffering } =
+    await enrichOfferingsWithCollegeData(detail.matched_offerings);
+
+  res.json({
+    success: true,
+    course_name: detail.course_name,
+    slug: detail.slug,
+    total: collegesOffering.length,
+    colleges: collegesOffering,
+    allCollegesData,
+  });
+};
+
+app.get("/api/main-course-card", asyncHandler(sendMainCourseCards));
+app.get("/api/courses/cards", asyncHandler(sendMainCourseCards));
+app.get("/api/main-course-card/:slug", asyncHandler(sendMainCourseDetail));
+app.get("/api/main-course/:slug", asyncHandler(sendMainCourseDetail));
+app.get("/api/course/:slug", asyncHandler(sendMainCourseDetail));
+app.get("/api/main-course-card/:slug/colleges", asyncHandler(sendMainCourseColleges));
+app.get("/api/main-course/:slug/colleges", asyncHandler(sendMainCourseColleges));
+app.get("/api/course/:slug/colleges", asyncHandler(sendMainCourseColleges));
+
+
+
+app.get("/api/course/:slug", asyncHandler(async (req, res) => {
+  const slug = req.params.slug;
+  const exactName = req.query.name?.trim();
+
+  if (!slug) return res.status(400).json({ success: false });
+
+  const normalizedSlug = normalizeCourse(slug.replace(/-/g, " "));
+  const normalizedExactName = exactName
+    ? normalizeCourse(exactName)
+    : null;
+
+  const colleges = await College.find(
+    { "rawScraped.courses": { $exists: true } },
+    { id: 1, name: 1, rating: 1, heroImages: 1, rawScraped: 1 }
+  ).lean();
+
+  let courseRows = [];
+  let uniqueCollegesMap = new Map();
+
+  colleges.forEach(college => {
+    (college.rawScraped?.courses || []).forEach(course => {
+      const courseKey = normalizeCourse(course.name);
+
+      let isMatch = false;
+
+      // ✅ EXACT VARIANT MATCH
+      if (normalizedExactName) {
+        isMatch = courseKey === normalizedExactName;
+      }
+      // ✅ FAMILY MATCH
+      else {
+        isMatch =
+          courseKey === normalizedSlug ||
+          courseKey.includes(normalizedSlug);
+      }
+
+      if (!isMatch) return;
+
+      courseRows.push({
+        name: course.name,
+        collegeId: college.id,
+        collegeName: college.name,
+        rating: Number(course.rating) || Number(college.rating) || 4,
+        fees: course.fees || "N/A",
+        duration: course.duration || "N/A",
+        eligibility: course.eligibility || "N/A",
+        mode: course.mode || "N/A",
+        reviews: parseInt(course.reviews) || 0,
+        details: {
+          heading: course.details?.heading || `${college.name} ${course.name}`,
+          overview_full_text:
+            course.details?.overview_full_text || "",
+          overview_paragraphs:
+            course.details?.overview_paragraphs || [],
+          highlights: course.details?.highlights || {}
+        },
+        collegeRaw: {
+          admission: college.rawScraped?.admission || []
+        }
+      });
+
+      if (!uniqueCollegesMap.has(college.id.toString())) {
+        uniqueCollegesMap.set(college.id.toString(), {
+          id: college.id,
+          name: college.name,
+          rating: college.rating,
+          image: college.heroImages?.[0] || null,
+          logo: college.rawScraped?.logo || null
+        });
+      }
+    });
+  });
+
+  if (!courseRows.length)
+    return res.status(404).json({ success: false });
+
+  const bestMatch = courseRows.reduce((a, b) =>
+    a.details.overview_full_text.length >
+    b.details.overview_full_text.length
+      ? a
+      : b
+  );
+
+  res.json({
+    success: true,
+    course: {
+      ...bestMatch,
+      totalColleges: uniqueCollegesMap.size,
+      avgRating: (
+        courseRows.reduce((s, c) => s + c.rating, 0) /
+        courseRows.length
+      ).toFixed(1)
+    },
+    allCollegesData: courseRows,
+    collegesOffering: Array.from(uniqueCollegesMap.values())
+  });
+}));
+
+
+
+
+// ✅ IMPROVED NORMALIZER: Integrated courses ko alag identify karne ke liye
+
+
+
+
+app.get("/api/course/:slug/colleges", asyncHandler(async (req, res) => {
+  const slug = decodeURIComponent(req.params.slug)
+    .toLowerCase()
+    .replace(/-/g, " ")
+    .trim();
+
+  const regex = new RegExp(slug.split(" ").join(".*"), "i");
+
+  const colleges = await College.find(
+    { "rawScraped.courses.name": regex },
+    {
+      id: 1,
+      name: 1,
+      rating: 1,
+      heroImages: 1
+    }
+  )
+    .sort({ rating: -1 })
+    .limit(20)
+    .lean();
+
+  res.json({
+    success: true,
+    total: colleges.length,
+    colleges
+  });
+}));
+
+
+
+
+app.get("/api/courses/cards", asyncHandler(async (req, res) => {
+  const bucket = req.query.bucket || "primary";
+
+  const courses = await College.aggregate([
+    /* 1️⃣ GET COURSES SAFELY */
+    {
+      $project: {
+        courses: { $ifNull: ["$rawScraped.courses", []] }
+      }
+    },
+    { $unwind: "$courses" },
+
+    /* 2️⃣ NORMALIZE NAME */
+    {
+      $addFields: {
+        rawName: "$courses.name",
+        cleanName: {
+          $trim: {
+            input: {
+              $toLower: {
+                $replaceAll: {
+                  input: "$courses.name",
+                  find: ".",
+                  replacement: ""
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    /* 3️⃣ DEGREE = FIRST TOKEN (DATA DRIVEN) */
+    {
+      $addFields: {
+        degree: {
+          $arrayElemAt: [{ $split: ["$cleanName", " "] }, 0]
+        }
+      }
+    },
+
+    /* 4️⃣ SPECIALIZATION (BRACKET > REST) */
+    {
+      $addFields: {
+        specialization: {
+          $cond: [
+            { $regexMatch: { input: "$rawName", regex: /\(/ } },
+            {
+              $toLower: {
+                $trim: {
+                  input: {
+                    $arrayElemAt: [
+                      { $split: ["$rawName", "("] },
+                      1
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              $trim: {
+                input: {
+                  $substrBytes: [
+                    "$cleanName",
+                    { $add: [{ $strLenBytes: "$degree" }, 1] },
+                    100
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+
+    /* 5️⃣ GROUP (NO RANDOM FIRST) */
+    {
+      $group: {
+        _id: {
+          degree: "$degree",
+          specialization: "$specialization"
+        },
+        names: { $addToSet: "$courses.name" },
+        duration: { $first: "$courses.duration" },
+        level: { $first: "$courses.mode" },
+        fees: { $avg: "$courses.feesRange" },
+        colleges: { $addToSet: "$_id" }
+      }
+    },
+
+    /* 6️⃣ PICK BEST NAME (NON-WORKING FIRST) */
+    {
+      $addFields: {
+        name: {
+          $ifNull: [
+            {
+              $first: {
+                $filter: {
+                  input: "$names",
+                  as: "n",
+                  cond: {
+                    $not: {
+                      $regexMatch: {
+                        input: "$$n",
+                        regex: /working|executive|part time|online/i
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            { $first: "$names" } // fallback
+          ]
+        }
+      }
+    },
+
+    /* 7️⃣ TOTAL COLLEGES */
+    {
+      $addFields: {
+        totalColleges: { $size: "$colleges" }
+      }
+    },
+
+    /* 8️⃣ AUTO TIER */
+    {
+      $addFields: {
+        tier: {
+          $cond: [
+            { $gte: ["$totalColleges", 5] },
+            "primary",
+            {
+              $cond: [
+                { $gte: ["$totalColleges", 2] },
+                "secondary",
+                "longtail"
+              ]
+            }
+          ]
+        }
+      }
+    },
+
+    /* 9️⃣ BUCKET FILTER */
+    ...(bucket === "primary"
+      ? [{ $match: { tier: "primary" } }]
+      : bucket === "secondary"
+      ? [{ $match: { tier: { $in: ["primary", "secondary"] } } }]
+      : []),
+
+    /* 🔟 FINAL SORT */
+    { $sort: { totalColleges: -1, name: 1 } },
+    { $limit: 500 }
+  ]);
+
+  res.json({
+    success: true,
+    bucket,
+    total: courses.length,
+    data: courses
+  });
+}));
+
+
+
+
 
 
 
@@ -1723,7 +4285,8 @@ app.post(
     emit("testimonial:created", testimonial);
     res.status(201).json({ success: true, data: testimonial });
   })
-);
+); 
+
 
 app.get(
   "/api/testimonials",
@@ -1847,6 +4410,7 @@ app.put(
       });
     }
 
+    resetCollegeCardCatalogCache();
     emit("college:updated", updated);
 
     res.json({
@@ -2134,6 +4698,7 @@ app.post("/api/scrape/migrate/:tempId", async (req, res) => {
       { $set: collegeDoc },
       { upsert: true }
     );
+    resetCollegeCardCatalogCache();
 
     /* ================= 6️⃣ SUCCESS ================= */
     res.json({
@@ -2446,3 +5011,6 @@ const PORT = process.env.PORT || 5000;
 
 //------PORT LISTENING------//
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+
+
