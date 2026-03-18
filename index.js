@@ -13,7 +13,7 @@ import { v2 as cloudinary } from "cloudinary";
 import multer from "multer";
 import fs from "fs";
 import Parser from "rss-parser";
-const parser = new Parser();
+
 
 import fetch from "node-fetch";
 
@@ -179,8 +179,10 @@ const computeAverageFees = (feesRange) => {
 };
 // ================= BLOG IMAGE UPLOAD (TOP) =================
 
-
+import axios from "axios";
+import * as cheerio from "cheerio";
 const app = express(); 
+const parser = new Parser();
 app.set("trust proxy", 1);
 
 app.use(express.json({ limit: "5mb" })); 
@@ -5506,6 +5508,148 @@ const coursesCount = courseAgg[0]?.total || 0;
 );
 
 
+app.get("/api/news", async (req, res) => {
+
+  try {
+
+    const feeds = [
+      "https://feeds.bbci.co.uk/news/education/rss.xml",
+      "https://timesofindia.indiatimes.com/rssfeeds/913168846.cms",
+      "https://www.thehindu.com/education/feeder/default.rss"
+    ];
+
+    let allArticles = [];
+
+    for (const url of feeds) {
+
+      try {
+
+        const feed = await parser.parseURL(url);
+
+        feed.items.forEach(item => {
+
+          allArticles.push({
+            title: item.title || "",
+            link: item.link || "",
+            description:
+              item.contentSnippet ||
+              item.content ||
+              item.summary ||
+              "No description available",
+            pubDate: item.pubDate || item.isoDate || "",
+            image:
+              item.enclosure?.url ||
+              item["media:content"]?.url ||
+              null,
+            source: feed.title || "Unknown"
+          });
+
+        });
+
+      } catch (err) {
+
+        console.log("RSS failed:", url);
+
+      }
+
+    }
+
+    // 🔹 Sort latest news first
+    allArticles.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
+
+    // 🔹 Optional limit (latest 30 news)
+    const latestNews = allArticles.slice(0, 30);
+
+    res.json({
+      status: "ok",
+      total: latestNews.length,
+      articles: latestNews
+    });
+
+  } catch (error) {
+
+    console.error(error);
+
+    res.status(500).json({
+      status: "error",
+      message: "Failed to fetch news"
+    });
+
+  }
+
+});
+
+app.get("/api/news/detail", async (req, res) => {
+  try {
+
+    const url = req.query.url;
+
+    if (!url) {
+      return res.status(400).json({
+        error: "Article URL required"
+      });
+    }
+
+    const response = await axios.get(url);
+    const $ = cheerio.load(response.data);
+
+    const title = $("h1").first().text().trim();
+
+    const image =
+      $('meta[property="og:image"]').attr("content") || null;
+
+    let paragraphs = [];
+
+    // 🔹 The Hindu
+    if (url.includes("thehindu.com")) {
+
+      $('div[itemprop="articleBody"] p').each((i, el) => {
+        const text = $(el).text().trim();
+        if (text.length > 40) paragraphs.push(text);
+      });
+
+    }
+
+    // 🔹 BBC
+    else if (url.includes("bbc.com")) {
+
+      $(".ssrcss-uf6wea-RichTextComponentWrapper p").each((i, el) => {
+        const text = $(el).text().trim();
+        if (text.length > 40) paragraphs.push(text);
+      });
+
+    }
+
+    // 🔹 Times of India
+    else if (url.includes("indiatimes.com")) {
+
+      $(".Normal p").each((i, el) => {
+        const text = $(el).text().trim();
+        if (text.length > 40) paragraphs.push(text);
+      });
+
+    }
+
+    const content = paragraphs.join("\n\n");
+
+    res.json({
+      status: "ok",
+      title,
+      image,
+      article_url: url,
+      content
+    });
+
+  } catch (error) {
+
+    console.error(error);
+
+    res.status(500).json({
+      error: "Failed to fetch article detail"
+    });
+
+  }
+});
 
 app.get("/api/courses/all", asyncHandler(async (req, res) => {
   const courses = await College.aggregate([
@@ -5587,7 +5731,9 @@ app.use("/api", (req, res) => {
     success: false,
     message: `API route not found: ${req.method} ${req.originalUrl}`,
   });
-});
+}); 
+
+
 
 app.use((err, req, res, next) => {
   console.error("Unhandled Error:", err);
