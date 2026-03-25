@@ -30,6 +30,12 @@ const tempConn = mongoose.createConnection(
 );
 
 mainConn.once("open", () => {
+  ensureFeaturedCollegeFieldDefaults().catch((error) => {
+    console.error(
+      "College featured_college default sync failed:",
+      error?.message || error
+    );
+  });
   getMainCourseCatalog().catch((error) => {
     console.error("Main course catalog warmup failed:", error?.message || error);
   });
@@ -646,6 +652,12 @@ const CollegeSchema = new mongoose.Schema({
   type: Number,
   default: null
 },
+  featured_college: {
+    type: String,
+    enum: ["featured", "No featured"],
+    default: "No featured",
+    set: (value) => value || "No featured",
+  },
 
   basic: {
     name: String,
@@ -682,6 +694,30 @@ CollegeSchema.index({ createdAt: -1 });
 CollegeSchema.index({ rating: -1, createdAt: -1 });
 
 const College = mainConn.model("college", CollegeSchema, "new_college");
+
+async function ensureFeaturedCollegeFieldDefaults() {
+  const result = await College.updateMany(
+    {
+      $or: [
+        { featured_college: { $exists: false } },
+        { featured_college: null },
+        { featured_college: "" },
+      ],
+    },
+    {
+      $set: {
+        featured_college: "No featured",
+      },
+    }
+  );
+
+  const modifiedCount = result?.modifiedCount || result?.nModified || 0;
+  if (modifiedCount > 0) {
+    console.log(
+      `Backfilled featured_college for ${modifiedCount} college records.`
+    );
+  }
+}
 
 const MainCourseDetailsSchema = new mongoose.Schema(
   {
