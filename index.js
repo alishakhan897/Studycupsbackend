@@ -2624,8 +2624,13 @@ app.get(
 
 
 app.get("/api/colleges", asyncHandler(async (req, res) => {
-  const page = Math.max(parseInt(req.query.page) || 1, 1);
-  const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+ const isAll = req.query.all === "true";
+
+const page = isAll ? 1 : Math.max(parseInt(req.query.page) || 1, 1);
+
+const limit = isAll
+  ? 1000
+  : Math.min(parseInt(req.query.limit) || 20, 50);
 
   {
     const [catalog, refs] = await Promise.all([
