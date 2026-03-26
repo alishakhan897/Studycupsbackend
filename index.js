@@ -3143,6 +3143,11 @@ let mainCourseCatalogCache = {
   promise: null,
 };
 
+let mainCourseCardsResponseCache = {
+  expiresAt: 0,
+  value: new Map(),
+};
+
 let mainCourseDetailCache = {
   expiresAt: 0,
   value: new Map(),
@@ -3156,6 +3161,11 @@ const resetMainCourseCatalogCache = () => {
     promise: null,
   };
 
+  mainCourseCardsResponseCache = {
+    expiresAt: 0,
+    value: new Map(),
+  };
+
   mainCourseDetailCache = {
     expiresAt: 0,
     value: new Map(),
@@ -3167,7 +3177,12 @@ const MAIN_COURSE_SUMMARY_PROJECTION = {
   stream: 1,
   source_url: 1,
   final_url: 1,
-  course: 1,
+  "course.course_name": 1,
+  "course.name": 1,
+  "course.mode": 1,
+  "course.duration": 1,
+  "course.level": 1,
+  "course.slug_url": 1,
   "course_detail.url": 1,
   "course_detail.toc_sections": 1,
   "syllabus_detail.url": 1,
@@ -3178,7 +3193,7 @@ const MAIN_COURSE_SUMMARY_PROJECTION = {
   fees: 1,
   collegeId: 1,
   college_id: 1,
-  details: 1,
+  "details.heading": 1,
   title: 1,
   full_name: 1,
   slug: 1,
@@ -3202,6 +3217,57 @@ const MAIN_COURSE_DETAIL_PROJECTION = {
   title: 1,
   full_name: 1,
   slug: 1,
+};
+
+const MAIN_COURSE_CMS_SUMMARY_PROJECTION = {
+  college_id: 1,
+  url: 1,
+  "courses.name": 1,
+  "courses.course_name": 1,
+  "courses.sub_course_name": 1,
+  "courses.title": 1,
+  "courses.heading": 1,
+  "courses.specialization": 1,
+  "courses.slug": 1,
+  "courses.slug_url": 1,
+  "courses.course_url": 1,
+  "courses.url": 1,
+  "courses.final_url": 1,
+  "courses.mode": 1,
+  "courses.study_mode": 1,
+  "courses.duration": 1,
+  "courses.avg_fees": 1,
+  "courses.average_fees": 1,
+  "courses.avgFees": 1,
+  "courses.fees": 1,
+  "courses.course_fees": 1,
+  "courses.courseFees": 1,
+  "courses.fee": 1,
+  "courses.total_fees": 1,
+  "courses.totalFees": 1,
+  "courses.sub_courses.name": 1,
+  "courses.sub_courses.course_name": 1,
+  "courses.sub_courses.sub_course_name": 1,
+  "courses.sub_courses.title": 1,
+  "courses.sub_courses.heading": 1,
+  "courses.sub_courses.specialization": 1,
+  "courses.sub_courses.slug": 1,
+  "courses.sub_courses.slug_url": 1,
+  "courses.sub_courses.course_url": 1,
+  "courses.sub_courses.url": 1,
+  "courses.sub_courses.final_url": 1,
+  "courses.sub_courses.mode": 1,
+  "courses.sub_courses.study_mode": 1,
+  "courses.sub_courses.duration": 1,
+  "courses.sub_courses.avg_fees": 1,
+  "courses.sub_courses.average_fees": 1,
+  "courses.sub_courses.avgFees": 1,
+  "courses.sub_courses.fees": 1,
+  "courses.sub_courses.course_fees": 1,
+  "courses.sub_courses.courseFees": 1,
+  "courses.sub_courses.fee": 1,
+  "courses.sub_courses.total_fees": 1,
+  "courses.sub_courses.totalFees": 1,
 };
 
 const collectCourseMatchKeys = (node = {}, extraValues = []) => {
@@ -3581,12 +3647,21 @@ const buildMainCourseCatalog = (mainCourseDocs = [], lookup = new Map()) => {
     return (a.course_name || "").localeCompare(b.course_name || "");
   });
 
-  return { cards, groupsByKey };
+  const cardsByBucket = {
+    all: cards,
+    primary: cards.filter((card) => card.tier === "primary"),
+    secondary: cards.filter((card) =>
+      ["primary", "secondary"].includes(card.tier)
+    ),
+    longtail: cards.filter((card) => card.tier === "longtail"),
+  };
+
+  return { cards, cardsByBucket, groupsByKey };
 };
 
 const loadCollegeCourseCmsDocs = async (
   query = {},
-  projection = { college_id: 1, url: 1, courses: 1 }
+  projection = MAIN_COURSE_CMS_SUMMARY_PROJECTION
 ) => {
   let docs = await CollegeCourseCMS.find(query, projection).lean();
   let collectionName = CollegeCourseCMS.collection.name;
@@ -3659,6 +3734,11 @@ const getMainCourseCatalog = async () => {
       pending: new Map(),
     };
 
+    mainCourseCardsResponseCache = {
+      expiresAt: mainCourseCatalogCache.expiresAt,
+      value: new Map(),
+    };
+
     return value;
   })();
 
@@ -3669,6 +3749,13 @@ const getMainCourseCatalog = async () => {
     throw error;
   }
 };
+
+const getMainCourseCardsResponseCacheKey = (
+  routePath,
+  bucket,
+  stream,
+  searchText
+) => [routePath, bucket || "all", stream || "", searchText || ""].join("::");
 
 const pickPrimaryMainCourseRecord = (records = []) => {
   if (!records.length) return null;
@@ -4225,26 +4312,31 @@ const buildCollegeAdminMainCourseCards = async (collegeId, collegeName = "") => 
 
 const sendMainCourseCards = async (req, res, next) => {
   const bucket = String(req.query.bucket || "all").trim().toLowerCase();
- const page = 1;
-const limit = Infinity;
+  const page = 1;
+  const limit = Infinity;
   const searchText = String(req.query.search || req.query.q || "")
     .trim()
     .toLowerCase();
   const stream = String(req.query.stream || "").trim().toLowerCase();
+  const cacheKey = getMainCourseCardsResponseCacheKey(
+    req.path,
+    bucket,
+    stream,
+    searchText
+  );
 
-  const { cards, college_course_collection } = await getMainCourseCatalog();
-
-  let filtered = cards;
-
-  if (bucket === "primary") {
-    filtered = filtered.filter((card) => card.tier === "primary");
-  } else if (bucket === "secondary") {
-    filtered = filtered.filter((card) =>
-      ["primary", "secondary"].includes(card.tier)
-    );
-  } else if (bucket === "longtail") {
-    filtered = filtered.filter((card) => card.tier === "longtail");
+  if (
+    mainCourseCardsResponseCache.expiresAt > Date.now() &&
+    mainCourseCardsResponseCache.value.has(cacheKey)
+  ) {
+    res.type("application/json");
+    return res.send(mainCourseCardsResponseCache.value.get(cacheKey));
   }
+
+  const { cards, cardsByBucket, college_course_collection } =
+    await getMainCourseCatalog();
+
+  let filtered = cardsByBucket?.[bucket] || cards;
 
   if (stream) {
     filtered = filtered.filter(
@@ -4269,7 +4361,7 @@ const limit = Infinity;
   }
 
   const data = filtered;
-  res.json({
+  const payload = {
     success: true,
     bucket,
     page,
@@ -4278,7 +4370,15 @@ const limit = Infinity;
     collection: MainCourse.collection.name,
     college_course_collection,
     data,
-  });
+  };
+  const serializedPayload = JSON.stringify(payload);
+
+  if (mainCourseCardsResponseCache.expiresAt > Date.now()) {
+    mainCourseCardsResponseCache.value.set(cacheKey, serializedPayload);
+  }
+
+  res.type("application/json");
+  return res.send(serializedPayload);
 };
 
 const sendMainCourseDetail = async (req, res, next) => {
