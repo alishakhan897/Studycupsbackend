@@ -52,11 +52,12 @@ cloudinary.config({
 });
 
 const allowedOrigins = [
-  // local
   "http://localhost:3000",
   "http://localhost:3001",
 
-  // production (VERCEL)
+  "https://studycups.in",
+  "https://www.studycups.in",
+
   "https://supportstudycups.vercel.app",
   "https://supportstudycups-5e5dg3cuk-alishakhan897s-projects.vercel.app"
 ];
@@ -1096,6 +1097,7 @@ const io = new SocketIOServer(server, {
   cors: {
     origin: allowedOrigins,
     methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true
   },
 });
 
