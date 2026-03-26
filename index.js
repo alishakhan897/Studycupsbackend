@@ -42,6 +42,7 @@ mainConn.once("open", () => {
   getCollegeCardCatalog().catch((error) => {
     console.error("College card catalog warmup failed:", error?.message || error);
   });
+  startCollegeInsertChangeStream();
 });
 
 cloudinary.config({
@@ -59,6 +60,10 @@ const allowedOrigins = [
   "https://supportstudycups.vercel.app",
   "https://supportstudycups-5e5dg3cuk-alishakhan897s-projects.vercel.app"
 ];
+
+const COLLEGE_SOCKET_ROOM = "colleges";
+const COLLEGE_LIST_CHANGED_EVENT = "college:list:changed";
+const COLLEGE_CHANGE_STREAM_RETRY_MS = 5000;
 
 function normalizeCollegeForMainDB(data) {
   return {
@@ -1117,6 +1122,14 @@ const emit = (event, payload) => {
     io.emit(event, payload);
   } catch (e) {
     console.warn("Socket emit error:", e.message);
+  }
+};
+
+const emitToRoom = (room, event, payload) => {
+  try {
+    io.to(room).emit(event, payload);
+  } catch (e) {
+    console.warn("Socket room emit error:", e.message);
   }
 };
 
@@ -2331,6 +2344,123 @@ const getCollegeCardCatalog = async () => {
   }
 };
 
+let collegeInsertChangeStream = null;
+let collegeInsertChangeStreamRetryTimer = null;
+let isCollegeInsertChangeStreamActive = false;
+
+function getCollegeRealtimeMeta() {
+  return {
+    room: COLLEGE_SOCKET_ROOM,
+    event: COLLEGE_LIST_CHANGED_EVENT,
+  };
+}
+
+function buildCollegeSocketPayload(college = {}, action = "created", extras = {}) {
+  const entry = buildCollegeCardCacheEntry(college);
+
+  return {
+    action,
+    source: extras.source || "api",
+    college: entry.listing,
+    card: entry.card,
+    listItem: entry.listItem,
+    realtime: getCollegeRealtimeMeta(),
+    emittedAt: new Date().toISOString(),
+  };
+}
+
+function emitCollegeRealtimeChange(action, college = {}, extras = {}) {
+  const payload = buildCollegeSocketPayload(college, action, extras);
+
+  if (action === "created") {
+    emit("college:created", payload);
+  }
+
+  emitToRoom(COLLEGE_SOCKET_ROOM, COLLEGE_LIST_CHANGED_EVENT, payload);
+  return payload;
+}
+
+function scheduleCollegeInsertChangeStreamRestart(reason = "unknown") {
+  if (collegeInsertChangeStreamRetryTimer) return;
+
+  console.warn(
+    `College insert change stream will retry in ${COLLEGE_CHANGE_STREAM_RETRY_MS}ms (${reason}).`
+  );
+
+  collegeInsertChangeStreamRetryTimer = setTimeout(() => {
+    collegeInsertChangeStreamRetryTimer = null;
+    startCollegeInsertChangeStream();
+  }, COLLEGE_CHANGE_STREAM_RETRY_MS);
+}
+
+function resetCollegeInsertChangeStreamState() {
+  isCollegeInsertChangeStreamActive = false;
+  const activeStream = collegeInsertChangeStream;
+  collegeInsertChangeStream = null;
+
+  if (!activeStream) return;
+
+  try {
+    activeStream.removeAllListeners();
+  } catch (error) {
+    console.warn("College insert change stream cleanup error:", error?.message || error);
+  }
+
+  try {
+    const closePromise = activeStream.close?.();
+    if (closePromise?.catch) {
+      closePromise.catch(() => {});
+    }
+  } catch (error) {
+    // ignore close errors during cleanup
+  }
+}
+
+function startCollegeInsertChangeStream() {
+  if (collegeInsertChangeStream || mainConn.readyState !== 1) return;
+
+  try {
+    collegeInsertChangeStream = College.watch([
+      { $match: { operationType: "insert" } },
+    ]);
+    isCollegeInsertChangeStreamActive = true;
+
+    console.log("College insert change stream started.");
+
+    collegeInsertChangeStream.on("change", (change) => {
+      const insertedCollege = change?.fullDocument;
+      if (!insertedCollege) return;
+
+      resetCollegeCardCatalogCache();
+      emitCollegeRealtimeChange("created", insertedCollege, {
+        source: "change-stream",
+      });
+    });
+
+    collegeInsertChangeStream.on("error", (error) => {
+      console.error(
+        "College insert change stream error:",
+        error?.message || error
+      );
+      resetCollegeInsertChangeStreamState();
+      scheduleCollegeInsertChangeStreamRestart("error");
+    });
+
+    collegeInsertChangeStream.on("close", () => {
+      console.warn("College insert change stream closed.");
+      resetCollegeInsertChangeStreamState();
+      scheduleCollegeInsertChangeStreamRestart("close");
+    });
+  } catch (error) {
+    console.warn(
+      "College insert change stream unavailable:",
+      error?.message || error
+    );
+    resetCollegeInsertChangeStreamState();
+    scheduleCollegeInsertChangeStreamRestart("startup");
+  }
+}
+
 app.post("/api/chat-registration", async (req, res) => {
   try {
     const { name, email, phone, course, city } = req.body;
@@ -2469,6 +2599,13 @@ app.post(
         ...req.body,
         id: Date.now(),
         imageUrl,
+        heroImage: req.body.heroImage || imageUrl || undefined,
+        heroImages:
+          Array.isArray(req.body.heroImages) && req.body.heroImages.length
+            ? req.body.heroImages
+            : imageUrl
+              ? [imageUrl]
+              : [],
         logoUrl,
         gallery: galleryUrls,
         rawScraped: req.body.rawScraped || {}
@@ -2477,6 +2614,10 @@ app.post(
 
       const saved = await college.save();
       resetCollegeCardCatalogCache();
+
+      if (!isCollegeInsertChangeStreamActive) {
+        emitCollegeRealtimeChange("created", saved, { source: "api" });
+      }
 
       res.status(201).json({
         success: true,
@@ -2617,6 +2758,7 @@ app.get(
       page,
       limit,
       total: total ?? catalog.total,
+      realtime: getCollegeRealtimeMeta(),
       data,
     });
   })
@@ -2650,6 +2792,7 @@ const limit = isAll
       page,
       limit,
       total: catalog.total,
+      realtime: getCollegeRealtimeMeta(),
       data
     });
   }
@@ -2712,13 +2855,18 @@ const limit = isAll
     page,
     limit,
     total: await College.countDocuments(),
+    realtime: getCollegeRealtimeMeta(),
     data
   });
 }));
 app.get("/api/colleges/list", asyncHandler(async (req, res) => {
   {
     const { list } = await getCollegeCardCatalog();
-    return res.json({ success: true, data: list });
+    return res.json({
+      success: true,
+      realtime: getCollegeRealtimeMeta(),
+      data: list
+    });
   }
 
   const colleges = await College.find(
@@ -3037,6 +3185,7 @@ app.delete(
     if (!deleted) return sendError(res, "College not found", 404);
     resetCollegeCardCatalogCache();
     emit("college:deleted", { id: Number(req.params.id) });
+    emitCollegeRealtimeChange("deleted", deleted, { source: "api" });
     res.json({ success: true, message: "College deleted" });
   })
 );
@@ -5149,6 +5298,7 @@ app.put(
 
     resetCollegeCardCatalogCache();
     emit("college:updated", updated);
+    emitCollegeRealtimeChange("updated", updated, { source: "api" });
 
     res.json({
       success: true,
