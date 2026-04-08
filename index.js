@@ -651,6 +651,7 @@ const CMSGalleryItemSchema = new mongoose.Schema(
 );
 
 const CollegeSchema = new mongoose.Schema({
+  id: Number,
   source: String,
   source_college_id: Number,
   url: String, 
@@ -668,10 +669,13 @@ const CollegeSchema = new mongoose.Schema({
   basic: {
     name: String,
     logo: String,
+    location: String,
     city: String,
     state: String,
     college_type: String,
     established_year: String,
+    accreditation: mongoose.Schema.Types.Mixed,
+    affiliations: mongoose.Schema.Types.Mixed,
     rating: Number,
     reviews: Number,
     about: mongoose.Schema.Types.Mixed,
@@ -771,11 +775,14 @@ const BasicCollegeCourseItemSchema = new mongoose.Schema(
     statistics: CMSControlledFieldSchema,
     rawData: CMSControlledFieldSchema,
   },
-  { _id: false }
+  { _id: false, strict: false }
 );
 
 const CollegeCourseSchema = new mongoose.Schema(
   {
+    source: String,
+    url: String,
+    college_id: Number,
     sourceUrl: CMSControlledFieldSchema,
     status: CMSControlledFieldSchema,
     progress: CMSControlledFieldSchema,
@@ -794,7 +801,7 @@ const CollegeCourseSchema = new mongoose.Schema(
     courses: [BasicCollegeCourseItemSchema],
     rawData: CMSControlledFieldSchema,
   },
-  { timestamps: true }
+  { timestamps: true, strict: false }
 );
 
 const MainCourse = mainConn.model("maincourse", MainCourseSchema, "maincourse");
@@ -2548,9 +2555,503 @@ app.get(
     res.json({ success: true, data: combined });
   })
 );
+const isPlainObjectValue = (value) =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
+const ensureArrayValue = (value) => {
+  if (Array.isArray(value)) return value;
+  if (value === undefined || value === null || value === "") return [];
+  return [value];
+};
 
+const pickManualInputValue = (...values) => {
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "string" && !value.trim()) continue;
+    return value;
+  }
+  return undefined;
+};
 
+const sanitizeManualMediaItems = (value) =>
+  ensureArrayValue(value)
+    .map((item) => {
+      const plainValue = toPlainValue(item);
+
+      if (typeof plainValue === "string") {
+        const text = plainValue.trim();
+        return text || null;
+      }
+
+      if (isPlainObjectValue(plainValue)) {
+        return plainValue;
+      }
+
+      return null;
+    })
+    .filter(Boolean);
+
+const buildManualCollegeCourseItems = (courses = []) =>
+  ensureArrayValue(courses)
+    .filter(isPlainObjectValue)
+    .map((course) => {
+      const courseDoc = { ...course };
+
+      [
+        "name",
+        "duration",
+        "level",
+        "fees",
+        "eligibility",
+        "about",
+        "mode",
+        "intake",
+        "admissionProcess",
+        "highlights",
+        "skills",
+        "structure",
+        "statistics",
+        "rawData",
+      ].forEach((key) => {
+        const nextValue = buildCmsControlledFieldValue(course[key]);
+        if (nextValue !== undefined) {
+          courseDoc[key] = nextValue;
+        }
+      });
+
+      if (course.sub_courses !== undefined) {
+        courseDoc.sub_courses = buildManualCollegeCourseItems(course.sub_courses);
+      }
+
+      const courseName = pickFirstText(
+        courseDoc.name,
+        course.course_name,
+        course.title,
+        course.heading
+      );
+
+      if (!courseDoc.course_name && courseName) {
+        courseDoc.course_name = courseName;
+      }
+
+      if (!courseDoc.slug_url && courseName) {
+        courseDoc.slug_url = cleanCourseSlug(courseName);
+      }
+
+      if (courseDoc.avg_fees === undefined && course.fees !== undefined) {
+        courseDoc.avg_fees =
+          parseCourseFeeAmount(courseDoc.fees) ?? toPlainValue(courseDoc.fees);
+      }
+
+      return courseDoc;
+    });
+
+const buildManualCollegePayload = (
+  collegeInput = {},
+  courseItems = [],
+  collegeCourseInput = {}
+) => {
+  const collegeDoc = isPlainObjectValue(collegeInput) ? { ...collegeInput } : {};
+  const basic = isPlainObjectValue(collegeDoc.basic) ? { ...collegeDoc.basic } : {};
+  const collegeId = getNumericId(collegeDoc.id) || generateId();
+  const name = pickFirstText(collegeDoc.name, basic.name);
+
+  if (!name) {
+    throw new Error("College name is required");
+  }
+
+  const city = pickFirstText(basic.city, collegeDoc.city);
+  const state = pickFirstText(basic.state, collegeDoc.state);
+  const location = pickFirstText(
+    collegeDoc.location,
+    [city, state].filter(Boolean).join(", ")
+  );
+  const ratingValue = pickManualInputValue(collegeDoc.rating, basic.rating);
+  const reviewCountValue = pickManualInputValue(
+    collegeDoc.reviewCount,
+    collegeDoc.reviews,
+    basic.reviews
+  );
+  const rating = parseNumericValue(ratingValue);
+  const reviewCount = parseNumericValue(reviewCountValue);
+  const heroImages = sanitizeManualMediaItems(
+    pickManualInputValue(
+      collegeDoc.heroImages,
+      collegeCourseInput.heroImages,
+      collegeCourseInput.hero_images,
+      collegeDoc.heroImage ? [collegeDoc.heroImage] : undefined
+    )
+  );
+  const gallery = sanitizeManualMediaItems(
+    pickManualInputValue(collegeDoc.gallery, collegeCourseInput.gallery, heroImages)
+  );
+  const firstHeroImage = pickFirstText(heroImages[0]?.src, heroImages[0]?.image, heroImages[0]);
+  const firstGalleryImage = pickFirstText(gallery[0]?.src, gallery[0]?.image, gallery[0]);
+  const heroImage = pickFirstText(
+    collegeDoc.heroImage,
+    firstHeroImage,
+    firstGalleryImage
+  );
+  const normalizedHeroImages = heroImages.length
+    ? heroImages
+    : heroImage
+      ? [heroImage]
+      : [];
+  const logoUrl = pickFirstText(collegeDoc.logoUrl, basic.logo);
+  const providedAvgFees = Number(collegeDoc.avg_fees);
+  const inferredAvgFees = averageNumbers(
+    courseItems
+      .map((course) => extractCourseFees(course))
+      .filter((value) => Number.isFinite(value))
+  );
+  const sourceCollegeId = getNumericId(collegeDoc.source_college_id);
+
+  delete collegeDoc.college;
+  delete collegeDoc.college_course;
+  delete collegeDoc.collegeCourse;
+  delete collegeDoc.courses;
+
+  return {
+    ...collegeDoc,
+    id: collegeId,
+    source: pickFirstText(collegeDoc.source) || "manual",
+    source_college_id:
+      sourceCollegeId ?? collegeDoc.source_college_id ?? undefined,
+    url: pickFirstText(collegeDoc.url) || undefined,
+    name,
+    location: location || undefined,
+    rating: rating ?? collegeDoc.rating ?? undefined,
+    reviewCount: reviewCount ?? collegeDoc.reviewCount ?? undefined,
+    heroImage: heroImage || undefined,
+    heroImages: normalizedHeroImages,
+    logoUrl: logoUrl || undefined,
+    featured_college: collegeDoc.featured_college || "No featured",
+    avg_fees:
+      Number.isFinite(providedAvgFees)
+        ? providedAvgFees
+        : inferredAvgFees ?? collegeDoc.avg_fees ?? null,
+    basic: {
+      ...basic,
+      name,
+      logo: logoUrl || basic.logo || undefined,
+      city: city || basic.city || undefined,
+      state: state || basic.state || undefined,
+      college_type:
+        pickManualInputValue(basic.college_type, collegeDoc.type) ??
+        basic.college_type,
+      established_year:
+        pickManualInputValue(
+          basic.established_year,
+          collegeDoc.established_year,
+          collegeDoc.established
+        ) ?? basic.established_year,
+      rating: rating ?? basic.rating ?? null,
+      reviews: reviewCount ?? basic.reviews ?? null,
+    },
+    gallery: gallery.length ? gallery : collegeDoc.gallery || [],
+  };
+};
+
+const buildManualCollegeCoursePayload = (
+  collegeCourseInput = {},
+  savedCollege = {},
+  courseItems = [],
+  collegeObjectId = null
+) => {
+  const courseDocInput = isPlainObjectValue(collegeCourseInput)
+    ? { ...collegeCourseInput }
+    : {};
+  const basic = isPlainObjectValue(savedCollege.basic) ? savedCollege.basic : {};
+  const collegeName = pickFirstText(savedCollege.name, basic.name);
+  const location = pickFirstText(
+    courseDocInput.location,
+    savedCollege.location,
+    [basic.city, basic.state].filter(Boolean).join(", ")
+  );
+  const ratingValue = pickManualInputValue(
+    courseDocInput.rating,
+    savedCollege.rating,
+    basic.rating
+  );
+  const reviewCountValue = pickManualInputValue(
+    courseDocInput.review_count,
+    courseDocInput.reviewCount,
+    savedCollege.reviewCount,
+    basic.reviews
+  );
+  const gallery = sanitizeManualMediaItems(
+    pickManualInputValue(courseDocInput.gallery, savedCollege.gallery)
+  );
+  const heroImages = sanitizeManualMediaItems(
+    pickManualInputValue(
+      courseDocInput.heroImages,
+      courseDocInput.hero_images,
+      savedCollege.heroImages,
+      savedCollege.heroImage ? [savedCollege.heroImage] : undefined
+    )
+  );
+  const rawDataSource = toPlainValue(
+    pickManualInputValue(courseDocInput.rawData, courseDocInput.raw_data)
+  );
+  const rawDataValue = isPlainObjectValue(rawDataSource)
+    ? { ...rawDataSource }
+    : {};
+
+  rawDataValue.linked_college_id = savedCollege.id;
+  rawDataValue.college_name = collegeName || rawDataValue.college_name || "";
+
+  if (collegeObjectId) {
+    rawDataValue.linked_college_object_id = String(collegeObjectId);
+  }
+
+  delete courseDocInput.college;
+  delete courseDocInput.college_course;
+  delete courseDocInput.collegeCourse;
+  delete courseDocInput.courses;
+
+  return {
+    ...courseDocInput,
+    source: pickFirstText(courseDocInput.source) || "manual",
+    college_id: getNumericId(courseDocInput.college_id, savedCollege.id),
+    url:
+      pickFirstText(courseDocInput.url, courseDocInput.sourceUrl, savedCollege.url) ||
+      undefined,
+    sourceUrl: buildCmsControlledFieldValue(
+      pickManualInputValue(
+        courseDocInput.sourceUrl,
+        courseDocInput.url,
+        savedCollege.url
+      )
+    ),
+    status: buildCmsControlledFieldValue(
+      pickManualInputValue(courseDocInput.status, "published")
+    ),
+    progress: buildCmsControlledFieldValue(
+      pickManualInputValue(courseDocInput.progress, 100)
+    ),
+    full_name: buildCmsControlledFieldValue(
+      pickManualInputValue(courseDocInput.full_name, collegeName)
+    ),
+    college_name: buildCmsControlledFieldValue(
+      pickManualInputValue(courseDocInput.college_name, collegeName)
+    ),
+    location: buildCmsControlledFieldValue(location || undefined),
+    estd_year: buildCmsControlledFieldValue(
+      pickManualInputValue(
+        courseDocInput.estd_year,
+        basic.established_year,
+        savedCollege.established_year
+      )
+    ),
+    college_type: buildCmsControlledFieldValue(
+      pickManualInputValue(courseDocInput.college_type, basic.college_type, savedCollege.type)
+    ),
+    rating: buildCmsControlledFieldValue(
+      parseNumericValue(ratingValue) ?? ratingValue
+    ),
+    review_count: buildCmsControlledFieldValue(
+      parseNumericValue(reviewCountValue) ?? reviewCountValue
+    ),
+    about_text: buildCmsControlledFieldValue(
+      pickManualInputValue(
+        courseDocInput.about_text,
+        courseDocInput.aboutText,
+        basic.about
+      )
+    ),
+    about_list: buildCmsControlledFieldValue(
+      pickManualInputValue(
+        courseDocInput.about_list,
+        courseDocInput.aboutList,
+        basic.about_highlights
+      )
+    ),
+    gallery: buildCmsControlledFieldValue(gallery.length ? gallery : undefined),
+    heroImages: buildCmsControlledFieldValue(
+      heroImages.length ? heroImages : undefined
+    ),
+    hero_generated: buildCmsControlledFieldValue(
+      pickManualInputValue(courseDocInput.hero_generated, false)
+    ),
+    courses: buildManualCollegeCourseItems(courseItems),
+    rawData: buildCmsControlledFieldValue(rawDataValue),
+  };
+};
+
+const findExistingCollegeForManualCreate = async (collegeDoc = {}) => {
+  const duplicateFilters = [];
+
+  if (Number.isFinite(Number(collegeDoc.id))) {
+    duplicateFilters.push({ id: Number(collegeDoc.id) });
+  }
+
+  if (
+    collegeDoc.source_college_id !== undefined &&
+    collegeDoc.source_college_id !== null &&
+    String(collegeDoc.source_college_id).trim()
+  ) {
+    duplicateFilters.push({ source_college_id: collegeDoc.source_college_id });
+  }
+
+  if (typeof collegeDoc.url === "string" && collegeDoc.url.trim()) {
+    duplicateFilters.push({ url: collegeDoc.url.trim() });
+  }
+
+  if (!duplicateFilters.length) {
+    return null;
+  }
+
+  return College.findOne({ $or: duplicateFilters }).lean();
+};
+
+app.post(
+  "/api/colleges/manual",
+  asyncHandler(async (req, res) => {
+    const collegeInput = isPlainObjectValue(req.body?.college)
+      ? req.body.college
+      : req.body;
+    const collegeCourseInput = isPlainObjectValue(req.body?.college_course)
+      ? req.body.college_course
+      : isPlainObjectValue(req.body?.collegeCourse)
+        ? req.body.collegeCourse
+        : {};
+    const requestedCourses = pickManualInputValue(
+      collegeCourseInput.courses,
+      req.body?.courses,
+      collegeInput?.courses
+    );
+    const courseItems = ensureArrayValue(requestedCourses).filter(isPlainObjectValue);
+
+    if (!isPlainObjectValue(collegeInput)) {
+      return sendError(res, "College payload is required");
+    }
+
+    if (!courseItems.length) {
+      return sendError(res, "At least one course is required");
+    }
+
+    const collegeDoc = buildManualCollegePayload(
+      collegeInput,
+      courseItems,
+      collegeCourseInput
+    );
+    const existingCollege = await findExistingCollegeForManualCreate(collegeDoc);
+
+    if (existingCollege) {
+      return res.status(409).json({
+        success: false,
+        message: "College already exists",
+        data: {
+          id: existingCollege.id || null,
+          _id: existingCollege._id,
+        },
+      });
+    }
+
+    const draftCourseDoc = buildManualCollegeCoursePayload(
+      collegeCourseInput,
+      collegeDoc,
+      courseItems
+    );
+    const courseDuplicateFilters = [];
+
+    if (Number.isFinite(Number(draftCourseDoc.college_id))) {
+      courseDuplicateFilters.push({
+        college_id: Number(draftCourseDoc.college_id),
+      });
+    }
+
+    if (typeof draftCourseDoc.url === "string" && draftCourseDoc.url.trim()) {
+      courseDuplicateFilters.push({ url: draftCourseDoc.url.trim() });
+    }
+
+    if (courseDuplicateFilters.length) {
+      const existingCourseDoc = await CollegeCourseCMS.findOne({
+        $or: courseDuplicateFilters,
+      }).lean();
+
+      if (existingCourseDoc) {
+        return res.status(409).json({
+          success: false,
+          message: "College course document already exists",
+          data: {
+            _id: existingCourseDoc._id,
+            college_id: existingCourseDoc.college_id || null,
+          },
+        });
+      }
+    }
+
+    let savedCollege = null;
+    let savedCourse = null;
+    const session = await mainConn.startSession();
+
+    try {
+      try {
+        await session.withTransaction(async () => {
+          [savedCollege] = await College.create([collegeDoc], { session });
+
+          const finalCourseDoc = buildManualCollegeCoursePayload(
+            collegeCourseInput,
+            savedCollege.toObject(),
+            courseItems,
+            savedCollege._id
+          );
+
+          [savedCourse] = await CollegeCourse.create([finalCourseDoc], {
+            session,
+          });
+        });
+      } catch (error) {
+        const message = error?.message || "";
+        const canFallbackToNonTransaction =
+          /transaction numbers are only allowed/i.test(message) ||
+          /replica set/i.test(message) ||
+          /transactions are not supported/i.test(message);
+
+        if (!canFallbackToNonTransaction) {
+          throw error;
+        }
+
+        savedCollege = await College.create(collegeDoc);
+
+        try {
+          const finalCourseDoc = buildManualCollegeCoursePayload(
+            collegeCourseInput,
+            savedCollege.toObject(),
+            courseItems,
+            savedCollege._id
+          );
+
+          savedCourse = await CollegeCourse.create(finalCourseDoc);
+        } catch (courseError) {
+          await College.deleteOne({ _id: savedCollege._id });
+          throw courseError;
+        }
+      }
+    } finally {
+      await session.endSession();
+    }
+
+    resetCollegeCardCatalogCache();
+    resetMainCourseCatalogCache();
+
+    if (!isCollegeInsertChangeStreamActive) {
+      emitCollegeRealtimeChange("created", savedCollege, {
+        source: "api-manual",
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "College and course data saved successfully",
+      data: {
+        college: savedCollege,
+        college_course: savedCourse,
+      },
+    });
+  })
+);
 
 app.post(
   "/api/colleges",
@@ -6049,6 +6550,3 @@ const PORT = process.env.PORT || 5000;
 
 //------PORT LISTENING------//
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
-
-
